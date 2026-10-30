@@ -132,9 +132,17 @@ object UnlockVideoSomeFunc : BaseHook() {
                 }
                 val newName = String(newChar)
                 XposedLog.d(TAG, lpparam.packageName, "find EnhanceContours Method(${methods.declaringClass}) is $newName")
-                findTat.declaringClass.findMethod { name("newName") }.createHook {
+                // 这里原来是 name("newName")，把变量当成了字面量，任何版本都会抛
+                // MemberNotFoundException("Method not found in <类>")；改成真正的 $newName，
+                // 并用 runCatching 兜底：OS4 上若没有「名字 +1」的那个方法，只记 W 不中断规则。
+                runCatching {
+                    findTat.declaringClass.findMethod { name(newName) }.createHook {
                         returnConstant(true)
                     }
+                }.onFailure {
+                    XposedLog.w(TAG, lpparam.packageName,
+                        "EnhanceContours target $newName not found, skip", it)
+                }
             }
         }
     }
