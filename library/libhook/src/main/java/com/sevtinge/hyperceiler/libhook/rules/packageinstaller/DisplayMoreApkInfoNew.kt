@@ -62,11 +62,14 @@ object DisplayMoreApkInfoNew : BaseHook() {
     private var mAppInfoViewObject: Class<*>? = null
     private var mAppInfoViewObjectViewHolder: Class<*>? = null
 
-    private val viewExcludeMethod2 by lazy<Method> {
-        requiredMember("ViewExcludeMethod2") {
+    private val appInfoViewObjectName =
+        $$"com.miui.packageInstaller.ui.listcomponets.AppInfoViewObject"
+
+    private val viewExcludeMethod2 by lazy<Method?> {
+        optionalMember("ViewExcludeMethod2") {
             it.findClass {
                 matcher {
-                    addUsingString("context.ge…ta.versionName", StringMatchType.Contains)
+                    className = appInfoViewObjectName
                 }
             }.findMethod {
                 matcher {
@@ -75,15 +78,15 @@ object DisplayMoreApkInfoNew : BaseHook() {
                     paramCount = 0
                     addUsingNumber(1)
                 }
-            }.single()
+            }.singleOrNull()
         }
     }
 
-    private val viewExcludeMethod1 by lazy<Method> {
-        requiredMember("ViewExcludeMethod1") {
+    private val viewExcludeMethod1 by lazy<Method?> {
+        optionalMember("ViewExcludeMethod1") {
             it.findClass {
                 matcher {
-                    addUsingString("context.ge…ta.versionName", StringMatchType.Contains)
+                    className = appInfoViewObjectName
                 }
             }.findMethod {
                 matcher {
@@ -92,15 +95,15 @@ object DisplayMoreApkInfoNew : BaseHook() {
                     paramCount = 0
                     addUsingString("")
                 }
-            }.single()
+            }.singleOrNull()
         }
     }
 
     private val viewMethod by lazy<List<Method>> {
-        requiredMemberList("ViewMethod") {
+        optionalMemberList("ViewMethod") {
             it.findClass {
                 matcher {
-                    addUsingString("context.ge…ta.versionName", StringMatchType.Contains)
+                    className = appInfoViewObjectName
                 }
             }.findMethod {
                 matcher {
@@ -112,11 +115,11 @@ object DisplayMoreApkInfoNew : BaseHook() {
         }
     }
 
-    private val entryMethod by lazy<Method> {
-        requiredMember("EntryMethod") {
+    private val entryMethod by lazy<Method?> {
+        optionalMember("EntryMethod") {
             it.findClass {
                 matcher {
-                    addUsingString("context.ge…ta.versionName", StringMatchType.Contains)
+                    className = appInfoViewObjectName
                 }
             }.findMethod {
                 matcher {
@@ -124,7 +127,7 @@ object DisplayMoreApkInfoNew : BaseHook() {
                     returnType = "void"
                     paramTypes = listOf($$"com.miui.packageInstaller.ui.listcomponets.AppInfoViewObject$ViewHolder")
                 }
-            }.single()
+            }.singleOrNull()
         }
     }
 
@@ -132,7 +135,7 @@ object DisplayMoreApkInfoNew : BaseHook() {
         optionalMember("ViewHolder") { bridge ->
             bridge.findClass {
                 matcher {
-                    addUsingString("context.ge…ta.versionName", StringMatchType.Contains)
+                    className = appInfoViewObjectName
                 }
             }.findField {
                 matcher {
@@ -146,17 +149,22 @@ object DisplayMoreApkInfoNew : BaseHook() {
 
     @SuppressLint("SetTextI18n")
     override fun init() {
-        if (viewHolderField == null) {
-            return
+        // OS3 及更早：AppInfoViewObject 里有一个 ViewHolder 字段，DexKit 定位到的无参 view 方法
+        //            通过 thisObject 取 ViewHolder；OS4 里这个字段没了，ViewHolder 由
+        //            bind 方法（public void xxx(ViewHolder)）的 args[0] 传入，走下面 candidateMethods 分支。
+        val reallyViewMethod: Method? = if (viewHolderField != null) {
+            viewMethod.firstOrNull { it != viewExcludeMethod1 && it != viewExcludeMethod2 }
+        } else {
+            null
         }
 
-        // pick the first view method that is not excluded
-        val reallyViewMethod: Method? = viewMethod.firstOrNull { it != viewExcludeMethod1 && it != viewExcludeMethod2 }
-
         // if we have a specific view method, ensure entry calls it
-        reallyViewMethod?.let { method ->
-            entryMethod.createBeforeHook {
-                callMethod(method.name)
+        if (reallyViewMethod != null && entryMethod != null) {
+            val entry = entryMethod!!
+            reallyViewMethod.let { method ->
+                entry.createBeforeHook {
+                    callMethod(method.name)
+                }
             }
         }
 
