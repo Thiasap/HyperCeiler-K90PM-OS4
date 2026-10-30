@@ -21,6 +21,7 @@ package com.sevtinge.hyperceiler.libhook.app;
 import com.hchen.database.HookBase;
 import com.sevtinge.hyperceiler.common.utils.PrefsBridge;
 import com.sevtinge.hyperceiler.libhook.base.BaseLoad;
+import com.sevtinge.hyperceiler.libhook.rules.guardprovider.DisableRiskAppData;
 import com.sevtinge.hyperceiler.libhook.rules.guardprovider.DisableRootedCheck;
 import com.sevtinge.hyperceiler.libhook.rules.guardprovider.DisableUploadAppListNew;
 
@@ -30,5 +31,7 @@ public class GuardProvider extends BaseLoad {
     public void onPackageLoaded() {
         initHook(new DisableRootedCheck(), PrefsBridge.getBoolean("guard_provider_disable_root_check"));
         initHook(new DisableUploadAppListNew(), PrefsBridge.getBoolean("disable_upload_applist"));
+        // 风险应用名单在 OS4 搬到了 guardprovider，和安全中心侧 FuckRiskPkg 共用同一个开关
+        initHook(new DisableRiskAppData(), PrefsBridge.getBoolean("security_center_disable_send_malicious_app_notification"));
     }
 }
