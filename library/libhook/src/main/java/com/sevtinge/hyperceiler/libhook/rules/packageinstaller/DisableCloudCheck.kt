@@ -66,9 +66,13 @@ object DisableCloudCheck : BaseHook() {
         return true
     }
 
-    // OS4 安装器的底部按钮换了实现（install_btn + 16 已经匹配不到，method2 的匹配串本身也是
-    // 被截断过的字面量），这两条只能做成可选：匹配不到时在 init() 里打 E 日志说明，
-    // 不影响下面真正的云校验 hook。
+    // OS4 安装器的底部按钮换了实现（install_btn + 16 已经匹配不到），
+    // 而 method2 的匹配串是从反编译结果里抄出来的源码片段
+    // （"getString(if (shouldUseU…e R.string.start_install)"，带省略号），
+    // dex 里根本不存在这种字符串，因此它**在任何版本上都不可能命中**——
+    // 这条「网络异常页按钮联动」其实一直是死代码。
+    // 该按钮联动的目的（网络异常页也能直接安装）现在由 hookNetworkErrorRiskTip 的
+    // a2 -> e2 替换覆盖，所以这里不再按失败处理：保持 optional，只在 init() 里打 W 说明。
     private val method1 by lazy<Method?> {
         optionalMember("NoNetworkInstallBtn") {
             it.findMethod {
@@ -98,14 +102,19 @@ object DisableCloudCheck : BaseHook() {
 
     /**
      * 老逻辑：网络异常页的「安装」按钮直接改调普通安装按钮。
+     * <p>
+     * method2 的锚点是反编译源码片段，任何版本都命中不了（见上方注释），
+     * 所以这条联动历史上就没生效过；它的目的已由 [hookNetworkErrorRiskTip] 的 a2 -> e2 覆盖，
+     * 因此这里只打 W，不再当作错误刷 E（E 应当留给真正的功能失效）。
      */
     private fun hookInstallButtons() {
         val m1 = method1
         val m2 = method2
         if (m1 == null || m2 == null) {
-            XposedLog.e(
+            XposedLog.w(
                 TAG, packageName,
-                "NoNetworkInstallBtn/NormalInstallBtn 未匹配，跳过按钮联动（不影响云校验）"
+                "网络异常页按钮联动未挂载（锚点为反编译片段，属历史遗留死代码）；" +
+                    "该场景已由 a2 -> e2 兜底覆盖，云校验直通生效"
             )
             return
         }
