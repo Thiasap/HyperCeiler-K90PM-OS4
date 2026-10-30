@@ -32,3 +32,8 @@ tests/lsposed-log-*/
 
 # AI agent working conventions (kept locally, not tracked)
 AGENTS.md
+
+# Agent scratch space: a private JDK/Gradle home, decompiled APK trees, decompiler output,
+# device logs, throwaway scripts and intermediate notes. None of it belongs in the repo -
+# the lasting conclusions are mirrored into handover/ and .workbuddy/ (committed separately).
+/_analysis/
