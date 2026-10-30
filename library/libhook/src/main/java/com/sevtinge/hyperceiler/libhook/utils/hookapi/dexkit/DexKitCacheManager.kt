@@ -203,7 +203,12 @@ internal object DexKitCacheManager {
                     resultList.add(instance as T)
                 }
             }
-            cache?.putStringList(key, serializedList)
+            // 空结果不写缓存：一条都没命中通常说明查询条件跟当前系统对不上（规则需要重新定位），
+            // 把「空」缓存下来会让这个 key 之后永久失效，连 requiredMember* 的报错都只在第一次出现，
+            // 排查时极易误导。不缓存空结果，下次进程启动仍会重新查询。
+            if (serializedList.isNotEmpty()) {
+                cache?.putStringList(key, serializedList)
+            }
         }
 
         return resultList
