@@ -32,10 +32,17 @@ object FuckRiskPkg : BaseHook() {
     }
 
     private val pkg by lazy<List<Method>> {
-        // OS4 里 riskPkgList / key_virus_pkg_list / show_virus_notification 三个字符串已全部消失
-        // （安全中心的风险应用逻辑被重写进 com.miui.antivirus），这里改成可选匹配：
-        // OS3 及更早版本照旧命中并 hook，OS4 上空列表直接跳过，不再让规则以 initDexKit failed 报错。
-        optionalMemberList("FuckRiskPkg") {
+        // 反编译 OS4 安全中心（8.x）确认：riskPkgList / key_virus_pkg_list / show_virus_notification
+        // 三个字符串已全部删除，风险应用名单逻辑整体迁出了本模块 scope ——
+        // 安全中心现在通过 eo.b 经 content://guard 调 com.miui.guardprovider 的
+        // "getRiskAppData" 拿名单，名单真正住在 guardprovider 进程里。
+        // 因此本规则在 OS4 上必然 0 命中：保持 requiredMemberList，让框架打 E 级
+        // 「required DexKit member list not found」如实暴露失配；
+        // （44b090c76 曾把它降级为 optionalMemberList + 空列表静默 return，
+        //  属于「掩耳盗铃」——功能失效却一条日志都没有，已回退。）
+        // TODO(OS4 后续): 在 com.miui.guardprovider scope 新增规则 hook guardprovider
+        //  侧的名单查询（见 handover/os4-hook-review-2026-10-31.md）。
+        requiredMemberList("FuckRiskPkg") {
             it.findMethod {
                 matcher {
                     usingEqStrings(
@@ -47,7 +54,6 @@ object FuckRiskPkg : BaseHook() {
     }
 
     override fun init() {
-        if (pkg.isEmpty()) return
         pkg.createHooks {
             returnConstant(null)
         }
