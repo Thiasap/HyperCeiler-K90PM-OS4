@@ -145,7 +145,10 @@ internal object DexKitCacheManager {
         val currentBridge = bridge ?: throw IllegalStateException("DexKit not initialized")
         var result: Any? = null
         currentBridge.withBridge { rawBridge ->
-            val baseData: BaseData = try {
+            // 注意：这里必须是可空类型。规则里用 singleOrNull()/firstOrNull() 表达
+            // 「可选匹配」时 0 命中会返回 null，若声明成非空 BaseData，Kotlin 会在这里
+            // 插入 intrinsic null check 抛 NPE，把「没找到」伪装成崩溃。
+            val baseData: BaseData? = try {
                 iDexKit.dexkit(rawBridge)
             } catch (e: ReflectiveOperationException) {
                 throw RuntimeException(e)
@@ -309,12 +312,19 @@ internal object DexKitCacheManager {
 
     /**
      * 把新查询得到的 [BaseData] 解析为反射对象，同时缓存其序列化结果。
+     *
+     * [baseData] 可能为 null：规则里用 {@code singleOrNull()} / {@code firstOrNull()}
+     * 表达「可选匹配」时，0 命中会返回 null。这里必须显式判空并抛出带 key 的异常，
+     * 否则会在下面 {@code baseData.javaClass} 处抛 NPE，把「没找到目标」伪装成崩溃。
      */
     private fun resolveAndCache(
-        baseData: BaseData,
+        baseData: BaseData?,
         key: String,
         classLoader: ClassLoader
     ): Any {
+        if (baseData == null) {
+            throw IllegalStateException("$key: DexKit query returned no result")
+        }
         return when (baseData) {
             is FieldData -> {
                 cache?.putString(key, baseData.toDexField().serialize())
