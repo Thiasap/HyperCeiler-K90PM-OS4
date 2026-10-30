@@ -25,8 +25,10 @@ import android.content.Context;
 import android.widget.ArrayAdapter;
 import android.widget.Spinner;
 
+import com.sevtinge.hyperceiler.common.log.XposedLog;
 import com.sevtinge.hyperceiler.libhook.R;
 import com.sevtinge.hyperceiler.libhook.base.BaseHook;
+import com.sevtinge.hyperceiler.libhook.utils.hookapi.tool.StaticFieldCompat;
 
 import java.util.List;
 
@@ -54,20 +56,40 @@ public class MoreVpnTypes extends BaseHook {
             || !canHookTypeSpinner(configDialog, Spinner.class)) return;
         if (editFragment == null && configDialog == null) return;
 
-        setVpnTypes(editFragment);
-        setVpnTypes(configDialog);
-        hookTypeSpinner(editFragment, miuiSpinner, true);
-        hookTypeSpinner(configDialog, Spinner.class, false);
+        // 只有真正改写了 VPN_TYPES 才去替换 spinner 列表，否则 spinner 条目数和
+        // VPN_TYPES.size() 对不上，选中下标会越界。
+        if (setVpnTypes(editFragment)) {
+            hookTypeSpinner(editFragment, miuiSpinner, true);
+        }
+        if (setVpnTypes(configDialog)) {
+            hookTypeSpinner(configDialog, Spinner.class, false);
+        }
     }
 
     private boolean canSetVpnTypes(Class<?> clazz) {
         return clazz == null || findFieldIfExists(clazz, "VPN_TYPES") != null;
     }
 
-    private void setVpnTypes(Class<?> clazz) {
-        if (clazz != null) {
-            setStaticObjectField(clazz, "VPN_TYPES", List.of(0, 1, 2, 3, 4, 5, 6, 7, 8));
+    private boolean setVpnTypes(Class<?> clazz) {
+        if (clazz == null) return false;
+        List<Integer> vpnTypes = List.of(0, 1, 2, 3, 4, 5, 6, 7, 8);
+        try {
+            // 旧机制：普通反射写入，Android 13 及更早有效
+            setStaticObjectField(clazz, "VPN_TYPES", vpnTypes);
+            return true;
+        } catch (Throwable t) {
+            XposedLog.w(TAG, getPackageName(),
+                "setVpnTypes: reflective write of VPN_TYPES failed, falling back to Unsafe", t);
         }
+        // OS4 兜底：VPN_TYPES 是 private static final，ART 拒绝 Field.set，改用 Unsafe
+        if (StaticFieldCompat.setStaticObject(clazz, "VPN_TYPES", vpnTypes)) {
+            XposedLog.d(TAG, getPackageName(), "setVpnTypes: VPN_TYPES overridden via Unsafe");
+            return true;
+        }
+        XposedLog.e(TAG, getPackageName(),
+            "setVpnTypes: unable to override VPN_TYPES on " + clazz.getName()
+                + " (unsafeAvailable=" + StaticFieldCompat.isAvailable() + ")");
+        return false;
     }
 
     private boolean canHookTypeSpinner(Class<?> clazz, Class<?> spinnerClass) {
