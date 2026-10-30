@@ -184,18 +184,23 @@ internal object DexKitCacheManager {
             }
 
             val serializedList = mutableListOf<String>()
+            // 单个成员解析失败（例如查询命中了 <init> 这类 DexKit 反解不了的方法）不应该
+            // 让整份列表失败：跳过坏成员，保留能用的部分。
             when (baseDataList) {
                 is FieldDataList -> for (f in baseDataList) {
+                    val instance = runCatching { f.getFieldInstance(classLoader) }.getOrNull() ?: continue
                     serializedList.add(f.toDexField().serialize())
-                    resultList.add(f.getFieldInstance(classLoader) as T)
+                    resultList.add(instance as T)
                 }
                 is MethodDataList -> for (m in baseDataList) {
+                    val instance = runCatching { m.getMethodInstance(classLoader) }.getOrNull() ?: continue
                     serializedList.add(m.toDexMethod().serialize())
-                    resultList.add(m.getMethodInstance(classLoader) as T)
+                    resultList.add(instance as T)
                 }
                 is ClassDataList -> for (c in baseDataList) {
+                    val instance = runCatching { c.getInstance(classLoader) }.getOrNull() ?: continue
                     serializedList.add(c.toDexClass().serialize())
-                    resultList.add(c.getInstance(classLoader) as T)
+                    resultList.add(instance as T)
                 }
             }
             cache?.putStringList(key, serializedList)
