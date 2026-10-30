@@ -32,7 +32,10 @@ object FuckRiskPkg : BaseHook() {
     }
 
     private val pkg by lazy<List<Method>> {
-        requiredMemberList("FuckRiskPkg") {
+        // OS4 里 riskPkgList / key_virus_pkg_list / show_virus_notification 三个字符串已全部消失
+        // （安全中心的风险应用逻辑被重写进 com.miui.antivirus），这里改成可选匹配：
+        // OS3 及更早版本照旧命中并 hook，OS4 上空列表直接跳过，不再让规则以 initDexKit failed 报错。
+        optionalMemberList("FuckRiskPkg") {
             it.findMethod {
                 matcher {
                     usingEqStrings(
@@ -44,6 +47,7 @@ object FuckRiskPkg : BaseHook() {
     }
 
     override fun init() {
+        if (pkg.isEmpty()) return
         pkg.createHooks {
             returnConstant(null)
         }
