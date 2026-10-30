@@ -34,7 +34,7 @@ object LockOneHundredPoints : BaseHook() {
         scoreOld
         score
         score3
-        addRiskApp
+        addRiskApps
         return true
     }
     private val scoreOld by lazy<Method> {
@@ -89,8 +89,13 @@ object LockOneHundredPoints : BaseHook() {
         }
     }
 
-    private val addRiskApp by lazy<Method> {
-        requiredMember("AddRiskApp") {
+    /**
+     * OS4 的 ScoreManager 已被完全混淆，原来「1 参 + 返回 void + 调用 TextUtils.isEmpty」
+     * 的条件现在会同时命中「加入风险应用」和「移除风险应用」两个方法，
+     * 因此不再用 .single()，而是把命中的方法全部 hook —— 两个方向都置空语义等价。
+     */
+    private val addRiskApps by lazy<List<Method>> {
+        requiredMemberList("AddRiskApp") {
             it.findClass {
                 matcher {
                     className = "com.miui.securityscan.scanner.ScoreManager"
@@ -101,7 +106,7 @@ object LockOneHundredPoints : BaseHook() {
                     paramCount = 1
                     returnType = "void"
                 }
-            }.single()
+            }
         }
     }
 
@@ -120,8 +125,10 @@ object LockOneHundredPoints : BaseHook() {
             score3.createHook {
                 returnConstant(true)
             }
-            addRiskApp.createHook {
-                returnConstant(null)
+            addRiskApps.forEach { method ->
+                method.createHook {
+                    returnConstant(null)
+                }
             }
         }.onFailure {
             XposedLog.e(TAG, lpparam.packageName, "LockOneHundredPoints hook Failed: $it")
