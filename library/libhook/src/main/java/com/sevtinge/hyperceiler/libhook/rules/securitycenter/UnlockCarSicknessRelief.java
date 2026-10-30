@@ -42,7 +42,10 @@ public class UnlockCarSicknessRelief extends BaseHook {
 
     @Override
     protected boolean initDexKit() {
-        mUnlockCarSicknessReliefMethod = requiredMember("UnlockCarSicknessRelief", new IDexKit() {
+        // OS4 的防晕车设置被重写（安全中心里只剩 com.miui.carsickness.*），
+        // 原来用 "is_support_carsick" 定的类已经不存在，这里改成「可选匹配」：
+        // 命中就照旧 hook，没命中就跳过，不再让整条规则以 initDexKit failed 报错退出。
+        mUnlockCarSicknessReliefMethod = optionalMember("UnlockCarSicknessRelief", new IDexKit() {
             @Override
             public BaseData dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
                 MethodData methodData = bridge.findMethod(FindMethod.create()
@@ -54,7 +57,7 @@ public class UnlockCarSicknessRelief extends BaseHook {
                 return methodData;
             }
         });
-        mUnlockCarSicknessRemindTimingMethod = requiredMember("UnlockCarSicknessRemindTiming", new IDexKit() {
+        mUnlockCarSicknessRemindTimingMethod = optionalMember("UnlockCarSicknessRemindTiming", new IDexKit() {
             @Override
             public BaseData dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
                 MethodData methodData = bridge.findMethod(FindMethod.create()
@@ -73,8 +76,12 @@ public class UnlockCarSicknessRelief extends BaseHook {
 
     @Override
     public void init() {
-        hookMethod(mUnlockCarSicknessReliefMethod, returnConstant(true));
-        hookMethod(mUnlockCarSicknessRemindTimingMethod, returnConstant(true));
+        if (mUnlockCarSicknessReliefMethod != null) {
+            hookMethod(mUnlockCarSicknessReliefMethod, returnConstant(true));
+        }
+        if (mUnlockCarSicknessRemindTimingMethod != null) {
+            hookMethod(mUnlockCarSicknessRemindTimingMethod, returnConstant(true));
+        }
     }
 }
 
