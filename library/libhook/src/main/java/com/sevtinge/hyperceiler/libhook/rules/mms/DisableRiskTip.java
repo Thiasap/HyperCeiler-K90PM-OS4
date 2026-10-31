@@ -68,8 +68,9 @@ public class DisableRiskTip extends BaseHook {
      * YellowPagePhone)V（private static，2 参 void），而类名和协议类的类名都没有混淆，
      * 可以直接按「类名 + 方法名」定位，比字符串锚点稳。
      * <p>
-     * 这里两条旧查询原样保留（老系统仍按字符串命中），只是降为 optional；
-     * OS4 再按类名反射兜底，全部失配时在 init() 里打 E 级日志，不再让整条规则连坐失效。
+     * 这里两条旧查询原样保留（老系统仍按字符串命中），只是降为 optional 兜底；
+     * OS4 的「类名 + 方法名」反射定位是<b>第一优先级</b>，全部失配时在 init() 里打 E 级日志，
+     * 不再让整条规则连坐失效。
      */
     @Override
     protected boolean initDexKit() {
@@ -149,11 +150,11 @@ public class DisableRiskTip extends BaseHook {
                 }
             });
         }
-        if (mFillYellowPageContactMethod == null) {
-            mFillYellowPageContactOs4Method = findFillYellowPageContactMethod();
-        }
-        Method fillYellowPageContact = mFillYellowPageContactMethod != null
-            ? mFillYellowPageContactMethod : mFillYellowPageContactOs4Method;
+        // 新逻辑优先：OS4 按「类名 + 方法名」直接定位
+        mFillYellowPageContactOs4Method = findFillYellowPageContactMethod();
+        // 旧逻辑兜底：老系统的 DexKit 字符串锚点
+        Method fillYellowPageContact = mFillYellowPageContactOs4Method != null
+            ? mFillYellowPageContactOs4Method : mFillYellowPageContactMethod;
         if (fillYellowPageContact != null) {
             XposedLog.d(TAG, getPackageName(), "Current hooking method is " + fillYellowPageContact);
             hookMethod(fillYellowPageContact, new IMethodHook() {

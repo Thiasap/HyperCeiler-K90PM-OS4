@@ -55,30 +55,33 @@ public class CustomRefreshRate extends BaseHook {
      * {@code DisplayFrameSetting.mIsCustomFpsSwitch}（String，"true" 表示开启自定义帧率）。
      * 因此 OS4 兜底改为 hook 它，并在 after 里把字段强制写成 "true"
      * —— 必须放在 after：原方法体本身就会写这个字段，写在 before 会被覆盖。
-     * 旧查询保留为第一优先级；新旧都失配时打 E。
+     * 本 fork 以 OS4 为准：先查 parseCustomModeSwitchFromDb，它没命中时才回退旧的
+     * fucSwitch 查询；新旧都失配时打 E。
      */
     @Override
     protected boolean initDexKit() {
-        mFucSwitchMethod = optionalMember("FucSwitch", new IDexKit() {
+        // ① 新逻辑优先：OS4 的 parseCustomModeSwitchFromDb(String)
+        mParseCustomModeSwitchMethod = optionalMember("ParseCustomModeSwitchOs4", new IDexKit() {
             @Override
             public BaseData dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
                 MethodData methodData = bridge.findMethod(FindMethod.create()
                         .matcher(MethodMatcher.create()
-                                .usingStrings("custom_mode_switch", "fucSwitch")
-                                .returnType(boolean.class)
+                            .usingEqStrings("custom_mode_switch", "fucSwitch")
+                            .paramTypes(String.class)
+                            .returnType(void.class)
                         )).singleOrNull();
                 return methodData;
             }
         });
-        if (mFucSwitchMethod == null) {
-            mParseCustomModeSwitchMethod = optionalMember("ParseCustomModeSwitchOs4", new IDexKit() {
+        // ② 新锚点未命中才回退旧逻辑
+        if (mParseCustomModeSwitchMethod == null) {
+            mFucSwitchMethod = optionalMember("FucSwitch", new IDexKit() {
                 @Override
                 public BaseData dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
                     MethodData methodData = bridge.findMethod(FindMethod.create()
                             .matcher(MethodMatcher.create()
-                                .usingEqStrings("custom_mode_switch", "fucSwitch")
-                                .paramTypes(String.class)
-                                .returnType(void.class)
+                                    .usingStrings("custom_mode_switch", "fucSwitch")
+                                    .returnType(boolean.class)
                             )).singleOrNull();
                     return methodData;
                 }
@@ -89,20 +92,22 @@ public class CustomRefreshRate extends BaseHook {
 
     @Override
     public void init() {
-        if (mFucSwitchMethod != null) {
-            XposedLog.d(TAG, getPackageName(), "Current hooking method is " + mFucSwitchMethod);
-            hookMethod(mFucSwitchMethod, new IMethodHook() {
-                @Override
-                public void before(HookParam param) {
-                    setObjectField(param.getThisObject(), FIELD_CUSTOM_FPS_SWITCH, VALUE_ENABLED);
-                }
-            });
-        }
+        // 新逻辑优先：OS4 在 after 里把静态字段强制写成 "true"
         if (mParseCustomModeSwitchMethod != null) {
             XposedLog.d(TAG, getPackageName(), "Current hooking OS4 method is " + mParseCustomModeSwitchMethod);
             hookMethod(mParseCustomModeSwitchMethod, new IMethodHook() {
                 @Override
                 public void after(HookParam param) {
+                    setObjectField(param.getThisObject(), FIELD_CUSTOM_FPS_SWITCH, VALUE_ENABLED);
+                }
+            });
+        }
+        // 旧逻辑兜底：老系统的 fucSwitch 开关方法
+        if (mFucSwitchMethod != null) {
+            XposedLog.d(TAG, getPackageName(), "Current hooking method is " + mFucSwitchMethod);
+            hookMethod(mFucSwitchMethod, new IMethodHook() {
+                @Override
+                public void before(HookParam param) {
                     setObjectField(param.getThisObject(), FIELD_CUSTOM_FPS_SWITCH, VALUE_ENABLED);
                 }
             });

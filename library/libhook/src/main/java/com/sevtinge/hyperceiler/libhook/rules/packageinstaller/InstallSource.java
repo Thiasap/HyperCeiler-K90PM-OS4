@@ -43,6 +43,10 @@ public class InstallSource extends BaseHook {
 
         mInstallSourcePackageName = PrefsBridge.getString("miui_package_installer_install_source", "com.android.fileexplorer");
 
+        // 新逻辑优先：OS4 起安装器按 (uid, 包名) 查 AppOps，uid 必须一起伪装
+        hookInstallSourceUid();
+
+        // 旧逻辑：包名伪装（老系统只认这个）
         findAndHookMethod(Activity.class, "getLaunchedFromPackage", new IMethodHook(){
             @Override
             public void before(HookParam param) {
@@ -53,8 +57,6 @@ public class InstallSource extends BaseHook {
         findAndHookMethod("com.miui.packageInstaller.InstallStart",
             "getCallingPackage",
             returnConstant(mInstallSourcePackageName));
-
-        hookInstallSourceUid();
     }
 
     /**

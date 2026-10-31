@@ -33,12 +33,13 @@ import org.luckypray.dexkit.result.MethodData;
 import org.luckypray.dexkit.result.base.BaseData;
 
 import java.lang.reflect.Method;
+import java.util.Collections;
 import java.util.List;
 
 import io.github.lingqiqi5211.ezhooktool.xposed.common.HookParam;
 
 public class DisableRootedCheck extends BaseHook {
-    private List<Method> mCheckRootMethods;
+    private List<Method> mCheckRootMethods = Collections.emptyList();
     private Method mRootManagerMethod;
     private Method mBootLockedMethod;
 
@@ -59,42 +60,45 @@ public class DisableRootedCheck extends BaseHook {
      * ro.secureboot.lockstate，返回 BL 是否上锁，最终写进 device_state 上报的 bl_locked 字段。
      * <p>
      * 两条都用各自唯一的日志/属性字符串锚定，不写死混淆类名（oe2 是 R8 方法外提类，混淆名跨版本会漂移）。
-     * 旧系统（HyperOS 2/3）的查询保留为第一优先级，只有它 0 命中时才启用 OS4 的两条查询。
+     * 本 fork 的目标系统就是 HyperOS 4，所以 OS4 的两条查询是<b>第一优先级</b>：
+     * 先查新锚点，两条都没命中时才回退旧系统（HyperOS 2/3）的 /system/bin/ 查询。
      */
     @Override
     protected boolean initDexKit() {
-        mCheckRootMethods = optionalMemberList("CheckRoot", new IDexKitList() {
+        // ① 新逻辑优先：OS4 的两个入口
+        mRootManagerMethod = optionalMember("CheckRootManagerOs4", new IDexKit() {
             @Override
-            public BaseDataList<?> dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
-                return bridge.findMethod(FindMethod.create()
-                    .matcher(MethodMatcher.create()
-                        .usingStrings("/system/bin/")
-                        .returnType(boolean.class)
-                    ));
+            public BaseData dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
+                MethodData methodData = bridge.findMethod(FindMethod.create()
+                        .matcher(MethodMatcher.create()
+                            .usingEqStrings("root manager found: ")
+                            .returnType(boolean.class)))
+                    .singleOrNull();
+                return methodData;
             }
         });
-        if (mCheckRootMethods.isEmpty()) {
-            mRootManagerMethod = optionalMember("CheckRootManagerOs4", new IDexKit() {
+        mBootLockedMethod = optionalMember("CheckBootLockedOs4", new IDexKit() {
+            @Override
+            public BaseData dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
+                MethodData methodData = bridge.findMethod(FindMethod.create()
+                        .matcher(MethodMatcher.create()
+                            .usingEqStrings("ro.boot.vbmeta.device_state")
+                            .paramCount(0)
+                            .returnType(boolean.class)))
+                    .singleOrNull();
+                return methodData;
+            }
+        });
+        // ② 新锚点全部未命中（老系统）才回退旧逻辑
+        if (mRootManagerMethod == null && mBootLockedMethod == null) {
+            mCheckRootMethods = optionalMemberList("CheckRoot", new IDexKitList() {
                 @Override
-                public BaseData dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
-                    MethodData methodData = bridge.findMethod(FindMethod.create()
-                            .matcher(MethodMatcher.create()
-                                .usingEqStrings("root manager found: ")
-                                .returnType(boolean.class)))
-                        .singleOrNull();
-                    return methodData;
-                }
-            });
-            mBootLockedMethod = optionalMember("CheckBootLockedOs4", new IDexKit() {
-                @Override
-                public BaseData dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
-                    MethodData methodData = bridge.findMethod(FindMethod.create()
-                            .matcher(MethodMatcher.create()
-                                .usingEqStrings("ro.boot.vbmeta.device_state")
-                                .paramCount(0)
-                                .returnType(boolean.class)))
-                        .singleOrNull();
-                    return methodData;
+                public BaseDataList<?> dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
+                    return bridge.findMethod(FindMethod.create()
+                        .matcher(MethodMatcher.create()
+                            .usingStrings("/system/bin/")
+                            .returnType(boolean.class)
+                        ));
                 }
             });
         }
@@ -103,15 +107,7 @@ public class DisableRootedCheck extends BaseHook {
 
     @Override
     public void init() {
-        for (Method method : mCheckRootMethods) {
-            XposedLog.d(TAG, getPackageName(), "Current hooking method is " + method);
-            hookMethod(method, new IMethodHook() {
-                @Override
-                public void before(HookParam param) {
-                    param.setResult(false);
-                }
-            });
-        }
+        // 新逻辑优先：OS4 的两个入口先装
         // OS4：root 管理器官网包名检测 → 一律当作没装
         if (mRootManagerMethod != null) {
             XposedLog.d(TAG, getPackageName(), "Current hooking OS4 root manager method is " + mRootManagerMethod);
@@ -121,6 +117,16 @@ public class DisableRootedCheck extends BaseHook {
         if (mBootLockedMethod != null) {
             XposedLog.d(TAG, getPackageName(), "Current hooking OS4 boot locked method is " + mBootLockedMethod);
             hookMethod(mBootLockedMethod, returnConstant(true));
+        }
+        // 旧逻辑兜底：老系统（HyperOS 2/3）的 /system/bin/ 路径检查
+        for (Method method : mCheckRootMethods) {
+            XposedLog.d(TAG, getPackageName(), "Current hooking method is " + method);
+            hookMethod(method, new IMethodHook() {
+                @Override
+                public void before(HookParam param) {
+                    param.setResult(false);
+                }
+            });
         }
         // 新旧入口一个都没拿到必须报 E：说明本规则在新系统上完全失配，不允许静默跳过
         if (mCheckRootMethods.isEmpty() && mRootManagerMethod == null && mBootLockedMethod == null) {

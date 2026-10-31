@@ -55,29 +55,34 @@ public class DisableUploadAppListNew extends BaseHook {
      * MiEngineNG#g、DeviceStateReporter、Binder onTransact 三条路径都走它；
      * 用它的唯一日志字符串 "updateAllDetectApps error, " 锚定，不写死混淆类名 ie2。
      * 把 e() 整个置空，等于「从来没上传过应用列表」，缓存也不会被云端结果覆盖。
+     * <p>
+     * 本 fork 以 OS4 为准：先查 OS4 的 updateAllDetectApps，它没命中时才回退旧的
+     * AntiDefraudAppManager 查询（老系统仍按旧字符串命中）。
      */
     @Override
     protected boolean initDexKit() {
-        mAntiDefraudAppManagerMethod = optionalMember("AntiDefraudAppManager", new IDexKit() {
+        // ① 新逻辑优先：OS4 的 updateAllDetectApps
+        mUpdateAllDetectAppsMethod = optionalMember("UpdateAllDetectAppsOs4", new IDexKit() {
             @Override
             public BaseData dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
                 MethodData methodData = bridge.findMethod(FindMethod.create()
                         .matcher(MethodMatcher.create()
-                            .usingStrings("AntiDefraudAppManager", "https://flash.sec.miui.com/detect/app")
-                        ))
+                            .usingEqStrings("updateAllDetectApps error, ")
+                            .paramTypes(android.content.Context.class)
+                            .returnType(void.class)))
                     .singleOrNull();
                 return methodData;
             }
         });
-        if (mAntiDefraudAppManagerMethod == null) {
-            mUpdateAllDetectAppsMethod = optionalMember("UpdateAllDetectAppsOs4", new IDexKit() {
+        // ② 新锚点未命中才回退旧逻辑
+        if (mUpdateAllDetectAppsMethod == null) {
+            mAntiDefraudAppManagerMethod = optionalMember("AntiDefraudAppManager", new IDexKit() {
                 @Override
                 public BaseData dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
                     MethodData methodData = bridge.findMethod(FindMethod.create()
                             .matcher(MethodMatcher.create()
-                                .usingEqStrings("updateAllDetectApps error, ")
-                                .paramTypes(android.content.Context.class)
-                                .returnType(void.class)))
+                                .usingStrings("AntiDefraudAppManager", "https://flash.sec.miui.com/detect/app")
+                            ))
                         .singleOrNull();
                     return methodData;
                 }
@@ -88,21 +93,23 @@ public class DisableUploadAppListNew extends BaseHook {
 
     @Override
     public void init() {
-        if (mAntiDefraudAppManagerMethod != null) {
-            XposedLog.d(TAG, getPackageName(), "Current hooking method is " + mAntiDefraudAppManagerMethod);
-            hookMethod(mAntiDefraudAppManagerMethod, new IReplaceHook() {
-                @Override
-                public Object replace(HookParam param) {
-                    return null;
-                }
-            });
-        }
+        // 新逻辑优先：OS4 的 updateAllDetectApps 整段置空
         if (mUpdateAllDetectAppsMethod != null) {
             XposedLog.d(TAG, getPackageName(), "Current hooking OS4 method is " + mUpdateAllDetectAppsMethod);
             hookMethod(mUpdateAllDetectAppsMethod, new IReplaceHook() {
                 @Override
                 public Object replace(HookParam param) {
                     // void 方法，直接返回 null 即整段跳过（不上传、不写缓存）
+                    return null;
+                }
+            });
+        }
+        // 旧逻辑兜底：老系统的 AntiDefraudAppManager
+        if (mAntiDefraudAppManagerMethod != null) {
+            XposedLog.d(TAG, getPackageName(), "Current hooking method is " + mAntiDefraudAppManagerMethod);
+            hookMethod(mAntiDefraudAppManagerMethod, new IReplaceHook() {
+                @Override
+                public Object replace(HookParam param) {
                     return null;
                 }
             });
