@@ -63,12 +63,18 @@ object BypassUDKWordLegalCheck : BaseHook() {
                 }
             }.single()
         }
-        // 新逻辑优先：HyperOS 4（com.miui.voicetrigger）把合规检查的域名从 i.ai.mi.com
-        // 换成了 i.xiaomixiaoai.com，日志串 "checkUDKWordLegal, callResult=" 与
-        // "onlineQuery=" 都已删除；带新域名 + "getUDKEnrollWordLegal can't get result"
-        // 的方法在全 dex 里唯一（v0.y#a(String, Context)String），就是原来那条联网合规检查。
-        // 新锚点没命中时才回退旧系统的 i.ai.mi.com 查询。
+        // 新逻辑优先，且不依赖域名：合规检查的日志串 "getUDKWordLegal, result=" 在 OS4 的
+        // VoiceTrigger.apk 里全 dex 唯一（v0.y#a(String, Context)String），域名反而换过一次
+        // （i.ai.mi.com → i.xiaomixiaoai.com），所以先用无域名的串锚定。
         bypassOnlineAccuracyResult = optionalMember("BypassOnlineAccuracyResultOs4") {
+            it.findMethod {
+                matcher {
+                    usingEqStrings("getUDKWordLegal, result=")
+                    returnType = "java.lang.String"
+                }
+            }.single()
+        } ?: optionalMember("BypassOnlineAccuracyResultOs4Domain") {
+            // 兜底：万一上面那条日志串被删，再用「域名 + getUDKEnrollWordLegal can't get result」定位
             it.findMethod {
                 matcher {
                     usingEqStrings(

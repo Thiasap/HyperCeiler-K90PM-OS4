@@ -48,14 +48,18 @@ object DisableSafeModelTip : BaseHook() {
     // PackageInstallerActivity 的「未知来源」判定会读这个 intent extra
     private const val EXTRA_TRUSTED_SOURCE = "EXTRA_IS_TRUSTED_SOURCE"
 
-    // 新安装页 l2.J#t(int) 的弹窗类型，10 = 「未知来源」确认
+    // 新安装页弹窗分发方法 t(int) 的类型码，10 = 「未知来源」确认
     private const val DIALOG_UNKNOWN_SOURCE = 10
+
+    // 该分发方法方法体里唯一的日志串（OS4 实测全 dex 唯一命中），用来代替写死的混淆类名 l2.J
+    private const val ANCHOR_UNKNOWN_SOURCE_DISPATCH = "Did not find app info for DLG_UNKNOWN_SOURCES: "
 
     override fun useDexKit() = true
 
     private var disableSafeModelTipMethod: Method? = null
     private var recyclerViewField: Field? = null
     private var unknownSourceCheckMethod: Method? = null
+    private var unknownSourceDispatchMethod: Method? = null
 
     override fun initDexKit(): Boolean {
         disableSafeModelTipMethod = optionalMember("DisableSafeModelTip") {
@@ -89,6 +93,17 @@ object DisableSafeModelTip : BaseHook() {
                     returnType = "void"
                 }
             }.singleOrNull()
+        }
+        // 新安装页的弹窗分发方法（原写法是写死 R8 混淆类名 l2.J + 方法名 t）。
+        // 混淆名跨版本会漂移，改用方法体里唯一的日志串 + (int)V 签名定位，实测 1 命中。
+        unknownSourceDispatchMethod = optionalMember("UnknownSourceDispatch") {
+            it.findMethod {
+                matcher {
+                    usingEqStrings(ANCHOR_UNKNOWN_SOURCE_DISPATCH)
+                    paramTypes("int")
+                    returnType = "void"
+                }
+            }.single()
         }
         return true
     }
@@ -146,23 +161,20 @@ object DisableSafeModelTip : BaseHook() {
 
     /**
      * OS4 默认走的新安装页 `NewInstallerPrepareActivity`：确认框不在 PackageInstallerActivity 里，
-     * 而是 `l2.J#t(int)` 按弹窗类型分发，10 = 「未知来源」（正文 resource `anonymous_source_warning`）。
-     * 它的「继续」按钮只调 `J#p()`（= 继续安装），所以这里遇到 10 直接调 p()、不再弹窗。
+     * 而是由弹窗分发方法 `t(int)` 按类型码分发，10 = 「未知来源」（正文 resource `anonymous_source_warning`）。
+     * 它的「继续」按钮只调 `p()`（= 继续安装），所以这里遇到 10 直接调 p()、不再弹窗。
      *
-     * `l2.J`、`t`、`p` 都是 R8 混淆名，且这条弹窗的文案是资源 id 的字段读取而不是整数字面量，
-     * DexKit 拿不到稳定锚点，只能按「类名 + (int) 签名」定位；找不到时打 E 日志。
+     * 类名/方法名都是 R8 混淆名（历史上是 `l2.J#t`），跨版本会漂移，所以不再写死：
+     * 由 [ANCHOR_UNKNOWN_SOURCE_DISPATCH] 在 DexKit 里定位分发方法，`p()` 再从实例上按名字反射调用。
+     * 定位失败时打 E 日志，不静默跳过。
      */
     private fun hookNewUnknownSourceDialog() {
-        val dialogClass = findClassIfExists("l2.J") ?: findClassIfExists("L2.J")
-        if (dialogClass == null) {
-            XposedLog.e(TAG, packageName, "未找到新安装页的弹窗分发类 l2.J，跳过未知来源确认")
-            return
-        }
-        val dispatch = dialogClass.declaredMethods.firstOrNull {
-            it.name == "t" && it.parameterCount == 1 && it.parameterTypes[0] == Integer.TYPE
-        }
+        val dispatch = unknownSourceDispatchMethod
         if (dispatch == null) {
-            XposedLog.e(TAG, packageName, "${dialogClass.name}#t(int) 未找到，跳过未知来源确认")
+            XposedLog.e(
+                TAG, packageName,
+                "未找到新安装页的未知来源弹窗分发方法（锚点 $ANCHOR_UNKNOWN_SOURCE_DISPATCH），跳过该确认框"
+            )
             return
         }
         hookMethod(dispatch, object : IMethodHook {
@@ -171,7 +183,7 @@ object DisableSafeModelTip : BaseHook() {
                 runCatching { callMethod(param.thisObject, "p") }
                     .onSuccess { param.result = null }
                     .onFailure {
-                        XposedLog.e(TAG, packageName, "${dialogClass.name}: 跳过未知来源弹窗失败", it)
+                        XposedLog.e(TAG, packageName, "${dispatch.declaringClass.name}: 跳过未知来源弹窗失败", it)
                     }
             }
         })

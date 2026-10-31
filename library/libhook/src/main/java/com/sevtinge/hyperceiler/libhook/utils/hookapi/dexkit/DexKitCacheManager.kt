@@ -137,8 +137,20 @@ internal object DexKitCacheManager {
 
         // 缓存 key 不带前缀，由 strings / lists 分组隐式区分
         // 先尝试命中内存缓存，命中时不创建原生桥
-        cache?.getString(key, null)?.let { cached ->
-            return deserializeAndResolve(cached, classLoader) as T
+        val cachedString = cache?.getString(key, null)
+        if (cachedString != null) {
+            // 缓存里的签名必须能在当前 classLoader 上解析出来才算命中。目标应用热更新、
+            // 缓存被写坏、成员被删都会让反射失败；旧实现把异常直接抛出去、key 又留在缓存里，
+            // 于是这个成员在之后每次启动都拿不到（optionalMember 静默 null，requiredMember
+            // 让整条规则永久 skip，直到 App 升级）。这里改成「驱逐 + 回退真实查询」，让缓存自愈。
+            val resolved = runCatching { deserializeAndResolve(cachedString, classLoader) as T }
+            if (resolved.isSuccess) return resolved.getOrThrow()
+            XposedLog.w(
+                tag,
+                "DexKit cache invalid for $key ($cachedString), evict and re-query",
+                resolved.exceptionOrNull() ?: IllegalStateException("cache resolve failed")
+            )
+            cache?.remove(key)
         }
 
         // 缓存未命中，获取原生桥执行查询
@@ -169,8 +181,25 @@ internal object DexKitCacheManager {
 
         // 缓存 key 不带前缀，由 strings / lists 分组隐式区分
         // 先尝试命中缓存
-        cache?.getStringList(key, null)?.let { cachedList ->
-            return cachedList.map { deserializeAndResolve(it, classLoader) as T }
+        val cachedList = cache?.getStringList(key, null)
+        if (cachedList != null) {
+            // 旧版本曾把空列表写进缓存（设备上仍能看到 "DisableRootedCheck#CheckRoot": []），
+            // 空列表一旦命中就永远不会重新查询，等于这个 key 永久失效；读到空值直接驱逐。
+            if (cachedList.isEmpty()) {
+                XposedLog.w(tag, "DexKit cache holds an empty list for $key, evict and re-query")
+                cache?.remove(key)
+            } else {
+                val resolved = runCatching {
+                    cachedList.map { deserializeAndResolve(it, classLoader) as T }
+                }
+                if (resolved.isSuccess) return resolved.getOrThrow()
+                XposedLog.w(
+                    tag,
+                    "DexKit cache invalid for $key (${cachedList.size} entries), evict and re-query",
+                    resolved.exceptionOrNull() ?: IllegalStateException("cache resolve failed")
+                )
+                cache?.remove(key)
+            }
         }
 
         // 缓存未命中，获取原生桥执行查询
