@@ -18,31 +18,29 @@
 */
 package com.sevtinge.hyperceiler.libhook.rules.securitycenter.other
 
+import android.net.Uri
+import android.os.Bundle
+import com.sevtinge.hyperceiler.common.log.XposedLog
 import com.sevtinge.hyperceiler.libhook.base.BaseHook
+import io.github.lingqiqi5211.ezhooktool.xposed.common.HookParam
 import io.github.lingqiqi5211.ezhooktool.xposed.dsl.createHooks
+import io.github.lingqiqi5211.ezhooktool.xposed.java.IMethodHook
 import java.lang.reflect.Method
 
 object FuckRiskPkg : BaseHook() {
 
+    private const val GUARD_AUTHORITY = "guard"
+    private const val CALL_GET_RISK_APP_DATA = "getRiskAppData"
+
+    private var legacyRiskPkgMethods: List<Method> = emptyList()
+
     override fun useDexKit(): Boolean = true
 
     override fun initDexKit(): Boolean {
-        pkg
-        return true
-    }
-
-    private val pkg by lazy<List<Method>> {
-        // 反编译 OS4 安全中心（8.x）确认：riskPkgList / key_virus_pkg_list / show_virus_notification
-        // 三个字符串已全部删除，风险应用名单逻辑整体迁出了本模块 scope ——
-        // 安全中心现在通过 eo.b 经 content://guard 调 com.miui.guardprovider 的
-        // "getRiskAppData" 拿名单，名单真正住在 guardprovider 进程里。
-        // 因此本规则在 OS4 上必然 0 命中：保持 requiredMemberList，让框架打 E 级
-        // 「required DexKit member list not found」如实暴露失配；
-        // （44b090c76 曾把它降级为 optionalMemberList + 空列表静默 return，
-        //  属于「掩耳盗铃」——功能失效却一条日志都没有，已回退。）
-        // TODO(OS4 后续): 在 com.miui.guardprovider scope 新增规则 hook guardprovider
-        //  侧的名单查询（见 handover/os4-hook-review-2026-10-31.md）。
-        requiredMemberList("FuckRiskPkg") {
+        // 旧锚点：OS4 已删除 riskPkgList / key_virus_pkg_list / show_virus_notification 三个字符串，
+        // 名单逻辑整体迁到 guardprovider，所以这里降级为 optionalMemberList —— 有就用它兜底，
+        // 没有也不再让整条规则以 "required DexKit member list not found" 失败。
+        legacyRiskPkgMethods = optionalMemberList("FuckRiskPkgLegacy") {
             it.findMethod {
                 matcher {
                     usingEqStrings(
@@ -51,11 +49,63 @@ object FuckRiskPkg : BaseHook() {
                 }
             }
         }
+        return true
     }
 
     override fun init() {
-        pkg.createHooks {
-            returnConstant(null)
+        // 新逻辑（OS4）：风险名单搬到 guardprovider 后，安全中心只剩一次跨进程查询 ——
+        //   getContentResolver().call(Uri.parse("content://guard"), "getRiskAppData", "", null)
+        // 拿到 Bundle 再读 riskData（见安全中心 eo/b 的 c(..)）。
+        // 直接拦这个调用返回空 Bundle，名单恒为空；不依赖任何已被删除的混淆锚点，
+        // 也不需要 guardprovider 进程活着。
+        val resolverClass = findClassIfExists("android.content.ContentResolver")
+        if (resolverClass == null) {
+            XposedLog.e(
+                TAG, getPackageName(),
+                "FuckRiskPkg: android.content.ContentResolver 不存在，风险名单无法清空"
+            )
+        } else {
+            val callMethod = findMethodExactIfExists(
+                resolverClass,
+                "call",
+                Uri::class.java,
+                String::class.java,
+                String::class.java,
+                Bundle::class.java
+            )
+            if (callMethod == null) {
+                XposedLog.e(
+                    TAG, getPackageName(),
+                    "FuckRiskPkg: ContentResolver#call(Uri,String,String,Bundle) 不存在，风险名单无法清空"
+                )
+            } else {
+                hookMethod(callMethod, object : IMethodHook {
+                    override fun after(param: HookParam) {
+                        val args = param.args
+                        if (args.size < 2) return
+                        val uri = args[0] as? Uri ?: return
+                        if (uri.authority != GUARD_AUTHORITY) return
+                        val called = args[1] as? String ?: return
+                        if (called != CALL_GET_RISK_APP_DATA) return
+                        param.result = Bundle.EMPTY
+                        XposedLog.d(
+                            TAG, getPackageName(),
+                            "FuckRiskPkg: 拦截 $GUARD_AUTHORITY#$CALL_GET_RISK_APP_DATA，风险名单返回空"
+                        )
+                    }
+                })
+            }
+        }
+
+        // 旧锚点兜底：老系统（名单仍在安全中心本地）继续用原来的 returnConstant(null)
+        if (legacyRiskPkgMethods.isNotEmpty()) {
+            XposedLog.d(
+                TAG, getPackageName(),
+                "FuckRiskPkg: 旧锚点仍可用（${legacyRiskPkgMethods.size} 个方法），一并 hook 为空"
+            )
+            legacyRiskPkgMethods.createHooks {
+                returnConstant(null)
+            }
         }
     }
 }
