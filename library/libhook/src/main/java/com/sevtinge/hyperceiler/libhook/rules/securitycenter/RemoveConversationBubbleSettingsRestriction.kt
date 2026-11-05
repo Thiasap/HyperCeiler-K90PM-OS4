@@ -21,6 +21,7 @@ package com.sevtinge.hyperceiler.libhook.rules.securitycenter
 import android.annotation.SuppressLint
 import android.content.Context
 import android.util.ArrayMap
+import com.sevtinge.hyperceiler.common.log.XposedLog
 import com.sevtinge.hyperceiler.libhook.base.BaseHook
 import io.github.lingqiqi5211.ezhooktool.core.findMethod
 import io.github.lingqiqi5211.ezhooktool.xposed.dsl.getObjectField
@@ -33,29 +34,40 @@ class RemoveConversationBubbleSettingsRestriction : BaseHook() {
     override fun init() {
         loadClass("com.miui.bubbles.settings.BubblesSettings").findMethod { name("getDefaultBubbles") }.createHook {
                 before { param ->
-                    val classBubbleApp = loadClass("com.miui.bubbles.settings.BubbleApp")
-                    val arrayMap = ArrayMap<String, Any>()
-                    val mContext =
-                        param.thisObject.getObjectField("mContext") as Context
-                    val mCurrentUserId =
-                        param.thisObject.getObjectField("mCurrentUserId") as Int
-                    val freeformSuggestionList = HiddenApiBypass.invoke(
-                        Class.forName("android.util.MiuiMultiWindowUtils"),
-                        null,
-                        "getFreeformSuggestionList",
-                        mContext
-                    ) as List<*>
-                    if (freeformSuggestionList.isNotEmpty()) {
-                        for (str in freeformSuggestionList) {
-                            val bubbleApp = classBubbleApp.getConstructor(
-                                String::class.java, Int::class.java
-                            ).newInstance(str, mCurrentUserId)
-                            classBubbleApp.getMethod("setChecked", Boolean::class.java)
-                                .invoke(bubbleApp, true)
-                            arrayMap[str as String] = bubbleApp
+                    // OS4 上 getFreeformSuggestionList / BubbleApp 的构造与 setChecked 签名都可能变，
+                    // 任一步失败都不能让 before 抛出去（会打断系统原本的气泡列表构建），
+                    // 也不能静默：统一在这里如实上报 E，让系统走默认逻辑。
+                    try {
+                        val classBubbleApp = loadClass("com.miui.bubbles.settings.BubbleApp")
+                        val arrayMap = ArrayMap<String, Any>()
+                        val mContext =
+                            param.thisObject.getObjectField("mContext") as Context
+                        val mCurrentUserId =
+                            param.thisObject.getObjectField("mCurrentUserId") as Int
+                        val freeformSuggestionList = HiddenApiBypass.invoke(
+                            Class.forName("android.util.MiuiMultiWindowUtils"),
+                            null,
+                            "getFreeformSuggestionList",
+                            mContext
+                        ) as List<*>
+                        if (freeformSuggestionList.isNotEmpty()) {
+                            for (str in freeformSuggestionList) {
+                                val bubbleApp = classBubbleApp.getConstructor(
+                                    String::class.java, Int::class.java
+                                ).newInstance(str, mCurrentUserId)
+                                classBubbleApp.getMethod("setChecked", Boolean::class.java)
+                                    .invoke(bubbleApp, true)
+                                arrayMap[str as String] = bubbleApp
+                            }
                         }
+                        param.result = arrayMap
+                    } catch (t: Throwable) {
+                        XposedLog.e(
+                            TAG, getPackageName(),
+                            "RemoveConversationBubbleSettingsRestriction: 构造气泡白名单失败，保持系统默认行为",
+                            t
+                        )
                     }
-                    param.result = arrayMap
                 }
             }
     }
