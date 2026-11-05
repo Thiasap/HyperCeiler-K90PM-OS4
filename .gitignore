@@ -37,3 +37,9 @@ AGENTS.md
 # device logs, throwaway scripts and intermediate notes. None of it belongs in the repo -
 # the lasting conclusions are mirrored into handover/ and .workbuddy/ (committed separately).
 /_analysis/
+
+# Local execution reports; intentionally not committed.
+reports/
+
+# Local proprietary launcher firmware fixtures extracted from a supplied APK.
+/firmware/

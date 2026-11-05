@@ -1,3 +1,6 @@
+#include "nativehook/android_diagnostics.h"
+#include "nativehook/native_log.h"
+#include "nativehook/safe_mode.h"
 /*
  * This file is part of HyperCeiler.
  * SPDX-License-Identifier: AGPL-3.0-or-later
@@ -31,6 +34,7 @@ void prime_home_layout_probe(int (*hook)(void *, void *, void **), int (*unhook)
 void home_layout_prepare_for_launcher_child();
 void prime_home_layout_knobs(int (*hook)(void *, void *, void **), int (*unhook)(void *));
 void prime_home_layout_first_render(int (*hook)(void *, void *, void **),int (*unhook)(void *));
+void prime_home_layout_first_render_from_property(int (*hook)(void *, void *, void **),int (*unhook)(void *));
 void home_layout_set_desktop_title_size(int sp);
 void home_layout_set_drawer_title_size(int sp);
 void home_layout_set_title_color(int argb);
@@ -97,8 +101,11 @@ bool is_launcher_process() {
     });
 }
 
+bool native_installation_blocked();
+
 #ifndef HYPERCEILER_HYOS_BACKEND
 void start_motion_after_specialization() {
+    if (native_installation_blocked()) return;
 #ifdef HYPERCEILER_DOCK_NATIVE_MOTION
     const int kind = g_process_kind.load(std::memory_order_acquire);
     // A launcher child re-asserts the start on every later signal. setprogname can run
@@ -150,6 +157,10 @@ bool is_prestart_property(std::string_view name) {
         name == "persist.sys.launch_response_optimization.enable";
 }
 
+bool native_installation_blocked() {
+    return nhk::home_safe_mode::decision().blocked;
+}
+
 int copy_property_value(char *destination, std::string_view value) {
     if (destination == nullptr) return 0;
     const size_t length = value.copy(destination, PROP_VALUE_MAX - 1);
@@ -158,18 +169,32 @@ int copy_property_value(char *destination, std::string_view value) {
 }
 
 int hooked_system_property_get(const char *name, char *value) {
+    if (native_installation_blocked()) return g_original_system_property_get == nullptr
+        ? 0 : g_original_system_property_get(name, value);
 #ifndef HYPERCEILER_HYOS_BACKEND
-    // HYOS maps its AOT libapp outside the ordinary linker callback path. The
-    // inherited property hook is the earliest reliable post-specialization signal.
-    start_motion_after_specialization();
-    if (g_hook_function != nullptr && is_launcher_process()) {
-        home_layout_prepare_for_launcher_child();
-        prime_home_layout_first_render(g_hook_function,g_unhook_function);
-        start_home_layout_hooks("property", g_hook_function, g_unhook_function);
-        // The specialization signal means this is the forked desktop itself, not the spawner that
-        // merely shares its cmdline: state inherited across the fork is poison, drop it first.
-        home_layout_engine::HomeLayoutEnginePrepareForLauncherChild();
-        home_layout_engine::StartHomeLayoutEngine();
+    // Impeller/gralloc also read properties on raster/background threads. Even
+    // a single cold fallback can read maps/APKs, allocate or install a backend
+    // there while the platform thread waits for a surface. Only the platform
+    // main thread may use the property startup signal. native_init, setprogname
+    // and genuine loader callbacks retain their own earlier startup paths.
+    // Nested/background queries must still receive all scalar overrides below.
+    static thread_local bool preparing=false;
+    if(!preparing&&gettid()==getpid()) {
+        struct Preparing {
+            bool& flag;
+            explicit Preparing(bool& value):flag(value){flag=true;}
+            ~Preparing(){flag=false;}
+        } preparation(preparing);
+        // HYOS maps its AOT libapp outside the ordinary linker callback path.
+        // The inherited property hook supplies a post-specialization signal.
+        start_motion_after_specialization();
+        if (g_hook_function != nullptr && is_launcher_process()) {
+            home_layout_prepare_for_launcher_child();
+            prime_home_layout_first_render_from_property(g_hook_function,g_unhook_function);
+            start_home_layout_hooks("property", g_hook_function, g_unhook_function);
+            home_layout_engine::HomeLayoutEnginePrepareForLauncherChild();
+            home_layout_engine::StartHomeLayoutEngine();
+        }
     }
 #endif
     // A stalled Binder poll must not keep an old affirmative preference alive.
@@ -215,6 +240,10 @@ int hooked_system_property_get(const char *name, char *value) {
 
 #ifndef HYPERCEILER_HYOS_BACKEND
 void hooked_setprogname(const char *name) {
+    if (native_installation_blocked()) {
+        if (g_original_setprogname != nullptr) g_original_setprogname(name);
+        return;
+    }
     g_launcher_identity.invalidate();
     if (g_original_setprogname != nullptr) g_original_setprogname(name);
     g_launcher_identity.invalidate();
@@ -242,7 +271,7 @@ void hooked_setprogname(const char *name) {
 }
 
 void install_process_name_hook() {
-    if (g_hook_function == nullptr ||
+    if (native_installation_blocked() || g_hook_function == nullptr ||
         g_process_name_hook_installed.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
@@ -260,7 +289,7 @@ void install_process_name_hook() {
 #endif
 
 void install_property_hook() {
-    if (g_hook_function == nullptr ||
+    if (native_installation_blocked() || g_hook_function == nullptr ||
         g_property_hook_installed.exchange(true, std::memory_order_acq_rel)) {
         return;
     }
@@ -279,7 +308,7 @@ void install_property_hook() {
 }
 
 void on_library_loaded(const char *name, void *) {
-    if (name == nullptr) return;
+    if (name == nullptr || native_installation_blocked()) return;
     const bool launcher = is_launcher_process();
 #ifdef HYPERCEILER_HYOS_BACKEND
     // Loader notifications are drained by the control worker. The exact Dart
@@ -351,6 +380,7 @@ jint native_status() {
 }  // namespace
 
 bool hyperceiler_home_prestart_disabled() {
+    if (native_installation_blocked()) return false;
 #ifdef HYPERCEILER_HYOS_BACKEND
     // Do not let a bootstrap JNI value revive an expired/disabled authorization.
     return hyos_control::feature_enabled(hyos_control::kDisablePrestart);
@@ -361,6 +391,7 @@ bool hyperceiler_home_prestart_disabled() {
 
 void hyperceiler_home_runtime_options(bool high_models, bool disable_prestart,
                                      bool soft_glass, bool dock_enabled, bool hide_report) {
+    if (native_installation_blocked()) return;
     g_high_device_level.store(high_models, std::memory_order_relaxed);
     g_disable_prestart.store(disable_prestart, std::memory_order_relaxed);
     g_soft_glass.store(soft_glass, std::memory_order_relaxed);
@@ -379,6 +410,7 @@ void hyperceiler_home_runtime_options(bool high_models, bool disable_prestart,
 
 #ifdef HYPERCEILER_HYOS_BACKEND
 void hyperceiler_home_after_startup() {
+    if (native_installation_blocked()) return;
 #ifdef HYPERCEILER_DOCK_NATIVE_MOTION
     if (hyos_control::feature_enabled(hyos_control::kDock))
         start_dock_native_motion(g_hook_function, g_unhook_function);
@@ -390,6 +422,7 @@ extern "C" JNIEXPORT jint JNICALL
 Java_com_sevtinge_hyperceiler_libhook_rules_home_other_NativeHomeHooksOS4_nativeConfigure(
     JNIEnv *, jobject, jboolean high_device_level, jboolean disable_prestart,
     jboolean soft_glass) {
+    if (native_installation_blocked()) return native_status();
     g_high_device_level.store(high_device_level == JNI_TRUE, std::memory_order_relaxed);
     g_disable_prestart.store(disable_prestart == JNI_TRUE, std::memory_order_relaxed);
     g_soft_glass.store(soft_glass == JNI_TRUE, std::memory_order_relaxed);
@@ -411,6 +444,13 @@ Java_com_sevtinge_hyperceiler_libhook_rules_home_other_NativeHomeHooksOS4_native
 }
 
 extern "C" JNIEXPORT jint JNICALL
+Java_com_sevtinge_hyperceiler_libhook_rules_home_other_NativeHomeHooksOS4_nativeFlushLogs(
+    JNIEnv *, jobject) {
+    nhk::native_log::flush();
+    return native_status();
+}
+
+extern "C" JNIEXPORT jint JNICALL
 Java_com_sevtinge_hyperceiler_libhook_rules_home_other_NativeHomeHooksOS4_nativeStatus(
     JNIEnv *, jobject) {
     return native_status();
@@ -422,6 +462,7 @@ Java_com_sevtinge_hyperceiler_libhook_rules_home_other_NativeHomeHooksOS4_native
 extern "C" JNIEXPORT jint JNICALL
 Java_com_sevtinge_hyperceiler_libhook_rules_home_other_NativeHomeHooksOS4_nativeSetDockEnabled(
     JNIEnv *, jobject, jboolean enabled) {
+    if (native_installation_blocked()) return native_status();
 #ifdef HYPERCEILER_DOCK_NATIVE_MOTION
     set_dock_motion_feature_enabled(enabled == JNI_TRUE);
 #endif
@@ -431,6 +472,7 @@ Java_com_sevtinge_hyperceiler_libhook_rules_home_other_NativeHomeHooksOS4_native
 extern "C" JNIEXPORT jint JNICALL
 Java_com_sevtinge_hyperceiler_libhook_rules_home_other_NativeHomeHooksOS4_nativeSetDesktopTitleSize(
     JNIEnv *, jobject, jint sp) {
+    if (native_installation_blocked()) return native_status();
     if (is_launcher_process() && sp >= 0 && sp <= 20) {
         home_layout_set_desktop_title_size(sp);
         if (g_hook_function != nullptr) {
@@ -443,6 +485,7 @@ Java_com_sevtinge_hyperceiler_libhook_rules_home_other_NativeHomeHooksOS4_native
 extern "C" JNIEXPORT jint JNICALL
 Java_com_sevtinge_hyperceiler_libhook_rules_home_other_NativeHomeHooksOS4_nativeSetDrawerTitleSize(
     JNIEnv *, jobject, jint sp) {
+    if (native_installation_blocked()) return native_status();
     if (is_launcher_process() && sp >= 0 && sp <= 20) {
         home_layout_set_drawer_title_size(sp);
         if (g_hook_function != nullptr) {
@@ -455,6 +498,7 @@ Java_com_sevtinge_hyperceiler_libhook_rules_home_other_NativeHomeHooksOS4_native
 extern "C" JNIEXPORT jint JNICALL
 Java_com_sevtinge_hyperceiler_libhook_rules_home_other_NativeHomeHooksOS4_nativeSetTitleColor(
     JNIEnv *, jobject, jint argb) {
+    if (native_installation_blocked()) return native_status();
     if (is_launcher_process()) {
         home_layout_set_title_color(argb);
         if (argb != -1 && g_hook_function != nullptr) {
@@ -467,8 +511,21 @@ Java_com_sevtinge_hyperceiler_libhook_rules_home_other_NativeHomeHooksOS4_native
 extern "C" [[gnu::visibility("default")]] [[gnu::used]]
 NativeOnModuleLoaded native_init(const NativeApiEntries *entries) {
     if (entries == nullptr || entries->hook_func == nullptr) return nullptr;
-    // A specialized Rust child retains /proc/self/exe=hyos_spawner. Its process
-    // identity is already Home; do not install the parent setprogname observer.
+    const auto safety = nhk::home_safe_mode::decision();
+    if (safety.blocked) {
+        nhk::native_log::writef(nhk::native_log::Level::warn, kLogTag,
+            "native hooks suppressed by safe mode state=%s",
+            nhk::home_safe_mode::state_name(safety.state));
+#ifdef HYPERCEILER_HYOS_BACKEND
+        // No Java bridge exists in the companion; flush through the existing
+        // logcat fallback so this one diagnostic is not lost in the buffer.
+        nhk::native_log::flush();
+#endif
+        return nullptr;
+    }
+    nhk::android_diagnostics::emit("module.native","Native 模块入口","NATIVE_INLINE","PROCESS_STARTED","MODULE_ENTRY","NATIVE_ENTRY","entry","native_init executed; Java injection and feature effect are separate evidence");
+    // A specialized Rust child retains /proc/self/exe=hyos_spawner. Distinguish
+    // its launcher identity from the parent before selecting startup behavior.
     const bool spawner = is_hyos_spawner_process() && !is_launcher_process();
     __android_log_print(ANDROID_LOG_INFO, kLogTag,
         "native v34 hook API version=%u unhook=%d hyosSpawner=%d launcher=%d",
@@ -488,7 +545,10 @@ NativeOnModuleLoaded native_init(const NativeApiEntries *entries) {
         home_layout_engine::HomeLayoutEnginePrepareForLauncherChild();
         home_layout_engine::StartHomeLayoutEngine();
     }
-    if (spawner) install_process_name_hook();
+    // Direct injection into an already-specialized launcher needs the same
+    // rename observer; otherwise identity caching stays disabled forever and
+    // every property query reads /proc/self/cmdline on the caller's thread.
+    if (spawner || is_launcher_process()) install_process_name_hook();
 #ifdef HYPERCEILER_DOCK_NATIVE_MOTION
     // In the normal path the spawner does not contain libapp.so. Starting here
     // would spend the entire retry budget before a launcher child is forked.
@@ -501,6 +561,9 @@ NativeOnModuleLoaded native_init(const NativeApiEntries *entries) {
 }
 
 extern "C" [[gnu::visibility("default")]] [[gnu::used]]
-jint JNI_OnLoad(JavaVM *, void *) {
+jint JNI_OnLoad(JavaVM *vm, void *) {
+    JNIEnv *env = nullptr;
+    if (vm != nullptr && vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) == JNI_OK)
+        nhk::native_log::attach_java_bridge(vm, env);
     return JNI_VERSION_1_6;
 }

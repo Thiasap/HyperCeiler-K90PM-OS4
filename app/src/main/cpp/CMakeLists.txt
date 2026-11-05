@@ -7,10 +7,16 @@ project(HyperCeilerNative LANGUAGES CXX)
 # The library name is the LSPosed native-hook contract: it must match the
 # `libHyperCeilerNative.so` entry of META-INF/xposed/native_init.list and the
 # `System.loadLibrary` name in NativeHomeHooksOS4.
-add_library(HyperCeilerNative SHARED targets/home/hyperceiler_home.cpp)
+add_library(HyperCeilerNative SHARED
+    nativehook/native_log.cpp
+    nativehook/safe_mode.cpp
+    targets/home/hyperceiler_home.cpp)
 
 option(HYPERCEILER_HYOS_BACKEND "Build the separate Zygisk Next native-only companion" OFF)
 if(HYPERCEILER_HYOS_BACKEND)
+    if(NOT HYPERCEILER_ZYGISK_NEXT_API_DIR)
+        set(HYPERCEILER_ZYGISK_NEXT_API_DIR "${CMAKE_CURRENT_SOURCE_DIR}/nativehook")
+    endif()
     set_target_properties(HyperCeilerNative PROPERTIES OUTPUT_NAME HyperCeilerHyos)
     if(NOT EXISTS "${HYPERCEILER_ZYGISK_NEXT_API_DIR}/zygisk_next_api.h")
         message(FATAL_ERROR "Supply the pinned Zygisk Next API 4 SDK header directory")
@@ -39,6 +45,7 @@ target_sources(HyperCeilerNative PRIVATE targets/home/home_layout_targets.cpp)
 target_sources(HyperCeilerNative PRIVATE targets/home/home_layout_config.cpp
     targets/home/home_layout_hooks.cpp
     targets/home/home_gestures_os4.cpp
+    targets/home/home_recents_haptic_runtime.cpp
     targets/home/home_layout_dart_arm64.S
     targets/home/home_back_gesture_arm64.S)
 
@@ -79,6 +86,7 @@ option(HYPERCEILER_DOCK_NATIVE_MOTION "Dynamically resolve OS4 native recents an
 if(HYPERCEILER_DOCK_NATIVE_MOTION)
     target_sources(HyperCeilerNative PRIVATE
         targets/home/dock_native_hooks.cpp
+        targets/home/home_recent_statusbar.cpp
         targets/home/dock_native_motion.cpp
         targets/home/dock_native_motion_arm64.S)
     target_compile_definitions(HyperCeilerNative PRIVATE HYPERCEILER_DOCK_NATIVE_MOTION=1)
