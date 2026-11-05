@@ -95,20 +95,26 @@ public class CustomRefreshRate extends BaseHook {
         // 新逻辑优先：OS4 在 after 里把静态字段强制写成 "true"
         if (mParseCustomModeSwitchMethod != null) {
             XposedLog.d(TAG, getPackageName(), "Current hooking OS4 method is " + mParseCustomModeSwitchMethod);
+            final Class<?> os4Owner = mParseCustomModeSwitchMethod.getDeclaringClass();
             hookMethod(mParseCustomModeSwitchMethod, new IMethodHook() {
                 @Override
                 public void after(HookParam param) {
-                    setObjectField(param.getThisObject(), FIELD_CUSTOM_FPS_SWITCH, VALUE_ENABLED);
+                    // mIsCustomFpsSwitch 是 static 字段，必须走静态写入；
+                    // 早前误用实例写入，after 每次都抛 NoSuchFieldException 而自定义帧率从未生效。
+                    setStaticObjectField(os4Owner, FIELD_CUSTOM_FPS_SWITCH, VALUE_ENABLED);
+                    XposedLog.d(TAG, getPackageName(),
+                        "mIsCustomFpsSwitch forced to \"" + VALUE_ENABLED + "\" after parseCustomModeSwitchFromDb");
                 }
             });
         }
-        // 旧逻辑兜底：老系统的 fucSwitch 开关方法
+        // 旧逻辑兜底：老系统的 fucSwitch 开关方法（字段同样是 static）
         if (mFucSwitchMethod != null) {
             XposedLog.d(TAG, getPackageName(), "Current hooking method is " + mFucSwitchMethod);
+            final Class<?> legacyOwner = mFucSwitchMethod.getDeclaringClass();
             hookMethod(mFucSwitchMethod, new IMethodHook() {
                 @Override
                 public void before(HookParam param) {
-                    setObjectField(param.getThisObject(), FIELD_CUSTOM_FPS_SWITCH, VALUE_ENABLED);
+                    setStaticObjectField(legacyOwner, FIELD_CUSTOM_FPS_SWITCH, VALUE_ENABLED);
                 }
             });
         }
