@@ -44,9 +44,13 @@ public class PrefsChangeObserver extends ContentObserver implements SharedPrefer
         remoteListenerRegistered = registerRemoteListenerIfAvailable();
 
         Uri uri = resolveObserverUri(type, name);
-        if (uri != null) {
-            // Keep the old ContentObserver registration so the platform owns this observer's lifecycle.
-            // Hook-side refresh still comes from remote prefs listener when available.
+        if (!remoteListenerRegistered && uri != null) {
+            // Provider observer is the FALLBACK only. Registering it next to a working remote
+            // listener costs a live unstable connection to the module app in every host process:
+            // the platform keeps the provider alive (and re-acquires it after every restart), so
+            // a provider-only cold start turns into a kill/restart cycle. The remote listener
+            // already delivers the same events through LSPosed, so the ContentObserver is only
+            // needed when remote preferences are unavailable.
             context.getContentResolver().registerContentObserver(uri, type == PrefType.Any, this);
         }
     }

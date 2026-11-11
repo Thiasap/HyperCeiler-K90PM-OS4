@@ -51,6 +51,8 @@ public class LogStatusManager {
     private static SharedPreferences.OnSharedPreferenceChangeListener localLogLevelListener;
     private static Context hookLogLevelObserverContext;
     private static ContentObserver hookLogLevelObserver;
+    private static SharedPreferences hookLogLevelRemotePrefs;
+    private static SharedPreferences.OnSharedPreferenceChangeListener hookLogLevelRemoteListener;
     private static String logLevelConfigBasePath;
     private static final String LOG_LEVEL_PREF_KEY = "prefs_key_" + LogLevelManager.PREF_KEY;
 
@@ -157,6 +159,36 @@ public class LogStatusManager {
                 } catch (Throwable ignored) {
                 }
             }
+            // Prefer the remote preferences listener. A ContentObserver on the module provider
+            // keeps a live connection to the module app from every host process, and the platform
+            // re-acquires that connection after each restart - i.e. it pins a provider-only cold
+            // start into a kill/restart cycle. The provider observer is the fallback for hosts
+            // where remote preferences are unavailable.
+            SharedPreferences remote = hookRemotePrefsForLogLevel();
+            if (remote != null) {
+                if (hookLogLevelRemoteListener == null) {
+                    hookLogLevelRemoteListener = (prefs, key) -> {
+                        if (LOG_LEVEL_PREF_KEY.equals(key)) {
+                            syncLogLevelFromPrefs();
+                        }
+                    };
+                }
+                if (hookLogLevelRemotePrefs != remote) {
+                    if (hookLogLevelRemotePrefs != null) {
+                        try {
+                            hookLogLevelRemotePrefs.unregisterOnSharedPreferenceChangeListener(
+                                hookLogLevelRemoteListener);
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                    remote.registerOnSharedPreferenceChangeListener(hookLogLevelRemoteListener);
+                    hookLogLevelRemotePrefs = remote;
+                }
+                hookLogLevelObserver = null;
+                hookLogLevelObserverContext = targetContext;
+                syncLogLevelFromPrefs();
+                return;
+            }
             if (hookLogLevelObserver == null) {
                 Handler handler = new Handler(targetContext.getMainLooper());
                 hookLogLevelObserver = new ContentObserver(handler) {
@@ -179,6 +211,18 @@ public class LogStatusManager {
         }
     }
 
+    @Nullable
+    private static SharedPreferences hookRemotePrefsForLogLevel() {
+        if (!PrefsBridge.isHookProcess()) {
+            return null;
+        }
+        try {
+            return PrefsBridge.getSharedPreferences();
+        } catch (IllegalStateException | LinkageError ignored) {
+            return null;
+        }
+    }
+
     public static void detachHookLogLevelObserver() {
         synchronized (logLevelLock) {
             if (hookLogLevelObserver != null && hookLogLevelObserverContext != null) {
@@ -187,6 +231,13 @@ public class LogStatusManager {
                 } catch (Throwable ignored) {
                 }
             }
+            if (hookLogLevelRemotePrefs != null && hookLogLevelRemoteListener != null) {
+                try {
+                    hookLogLevelRemotePrefs.unregisterOnSharedPreferenceChangeListener(hookLogLevelRemoteListener);
+                } catch (Throwable ignored) {
+                }
+            }
+            hookLogLevelRemotePrefs = null;
             hookLogLevelObserverContext = null;
             hookLogLevelObserver = null;
         }

@@ -60,8 +60,25 @@ public class SharedPrefsProvider extends ContentProvider {
     SharedPreferences prefs;
     private final DockGlassHost dockGlassHost = new DockGlassHost();
 
+    /**
+     * Caller trace, for attributing the provider traffic that keeps this app being restarted.
+     *
+     * <p>Every read of this provider wakes a process HyperOS has frozen, and a read that arrives
+     * while the process is still frozen is what the platform records as an unstable provider and
+     * kills. Finding the caller therefore needs the pid and the path, which nothing else reports:
+     * `dumpsys activity providers` names the client process but not what it asked for.
+     *
+     * <p>Off unless `debug.hyperceiler.provider_trace` is 1, and read per call, so it can be armed
+     * from adb without restarting either side:
+     *   adb shell setprop debug.hyperceiler.provider_trace 1
+     *   adb shell logcat -s HyperCeiler.Raw.provider-trace
+     */
     @Override
     public Bundle call(String method, String arg, Bundle extras) {
+        if (SystemProperties.getBoolean("debug.hyperceiler.provider_trace", false)) {
+            ModuleLog.i("provider-trace", "call pid=" + Binder.getCallingPid()
+                + " uid=" + Binder.getCallingUid() + " method=" + method);
+        }
         if (method != null && method.startsWith("dock_glass_")) {
             return dockGlassHost.call(getContext(), method, arg, extras);
         }
@@ -190,6 +207,10 @@ public class SharedPrefsProvider extends ContentProvider {
 
     @Override
     public Cursor query(Uri uri, String[] projection, String selection, String[] selectionArgs, String sortOrder) {
+        if (SystemProperties.getBoolean("debug.hyperceiler.provider_trace", false)) {
+            ModuleLog.i("provider-trace", "query pid=" + Binder.getCallingPid()
+                + " uid=" + Binder.getCallingUid() + " path=" + uri.getPath());
+        }
         if (AUTHORITY.equals(uri.getAuthority()) && "/weather_config".equals(uri.getPath())) {
             return WeatherPrefsSnapshot.cursor(prefs);
         }

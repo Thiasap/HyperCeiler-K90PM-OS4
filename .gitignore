@@ -43,3 +43,6 @@ reports/
 
 # Local proprietary launcher firmware fixtures extracted from a supplied APK.
 /firmware/
+
+# AI agent scratch space (analysis notes, device log dumps). Never published.
+.agent

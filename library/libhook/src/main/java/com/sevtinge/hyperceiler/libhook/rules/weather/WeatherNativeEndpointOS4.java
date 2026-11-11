@@ -41,6 +41,10 @@ public final class WeatherNativeEndpointOS4 {
     private static final String PACKAGE = "com.miui.weather2";
     private static final String[][] SPECS = WeatherPrefsSnapshot.specs();
     private static final Object WORKER_LOCK = new Object();
+    private static final java.util.concurrent.atomic.AtomicLong NOTIFICATIONS =
+        new java.util.concurrent.atomic.AtomicLong();
+    private static volatile android.content.SharedPreferences remotePrefs;
+    private static volatile android.content.SharedPreferences.OnSharedPreferenceChangeListener prefsListener;
     // One query lane per module classloader, even when a retired provider query ignores interrupt.
     private static Thread worker;
     private static WeatherNativeEndpointOS4 owner;
@@ -66,6 +70,7 @@ public final class WeatherNativeEndpointOS4 {
 
     /** Install routing first. Neither receive nor readSnapshot starts or waits for this worker. */
     public void startPrefetch() {
+        ensurePrefsListener();
         synchronized (WORKER_LOCK) {
             if (retired || (owner != null && owner != this && !owner.retired)) return;
             owner = this;
@@ -73,6 +78,30 @@ public final class WeatherNativeEndpointOS4 {
             worker = new Thread(WeatherNativeEndpointOS4::workerLoop, "hc-weather-prefs");
             worker.setDaemon(true);
             worker.start();
+        }
+    }
+
+    /**
+     * Remote preferences deliver changes inside this process, so the endpoint never needs a
+     * provider observer (which would pin a live connection to the module app) and never needs a
+     * periodic provider read (which would land on a frozen provider and get the app killed).
+     */
+    private static void ensurePrefsListener() {
+        if (prefsListener != null) return;
+        synchronized (WORKER_LOCK) {
+            if (prefsListener != null) return;
+            try {
+                final android.content.SharedPreferences prefs =
+                    com.sevtinge.hyperceiler.common.utils.PrefsBridge.getSharedPreferences();
+                if (prefs == null) return;
+                final android.content.SharedPreferences.OnSharedPreferenceChangeListener listener =
+                    (changed, key) -> NOTIFICATIONS.incrementAndGet();
+                prefs.registerOnSharedPreferenceChangeListener(listener);
+                remotePrefs = prefs;
+                prefsListener = listener;
+            } catch (RuntimeException | Error ignored) {
+                // Keep serving the last published snapshot.
+            }
         }
     }
 
@@ -125,6 +154,8 @@ public final class WeatherNativeEndpointOS4 {
 
     private static void workerLoop() {
         long delay = ACTIVE_REFRESH_MS;
+        long lastProviderAtNanos = 0;
+        long lastNotifiedVersion = 0;
         try {
             for (;;) {
                 final WeatherNativeEndpointOS4 current;
@@ -135,7 +166,16 @@ public final class WeatherNativeEndpointOS4 {
                 Thread.interrupted();
                 // The failure ladder is unchanged while the panel is interactive; doze only lifts
                 // the floor, and the slice loop below returns early the moment it stops being doze.
-                delay = nextDelay(delay, current.refreshFromProvider(), screenInteractive());
+                final long now = SystemClock.elapsedRealtimeNanos();
+                // Push only: a settings edit bumps NOTIFICATIONS. A periodic read would land on a
+                // frozen provider-only process and get the module app killed.
+                final long seen = NOTIFICATIONS.get();
+                final boolean needProvider = lastProviderAtNanos == 0 || seen != lastNotifiedVersion;
+                final boolean refreshed = needProvider
+                    ? current.refreshFromProvider()
+                    : current.renewLeaseFromCache(now);
+                if (needProvider) { lastProviderAtNanos = now; lastNotifiedVersion = seen; }
+                delay = nextDelay(delay, refreshed, screenInteractive());
                 synchronized (WORKER_LOCK) { if (owner != current) continue; }
                 try { sleepWithIdleGate(delay); } catch (InterruptedException changedOwner) { }
             }
@@ -188,6 +228,25 @@ public final class WeatherNativeEndpointOS4 {
             if (!success && ticket == attempt && !retired) invalidateLocked();
         }
         return success;
+    }
+
+    /**
+     * Re-publishes the values already decoded with a fresh five-second lease, without the
+     * cross-process provider query.
+     *
+     * Values, epoch and revision are carried over unchanged. A lapsed lease is deliberately
+     * revivable from the cache: the values are immutable until the remote-preferences listener
+     * reports a change, and refusing to renew would leave the endpoint stalled after any sleep
+     * longer than {@link #LEASE_NS} (doze cycles are 30 s) because the push trigger, by design,
+     * never fires on its own.
+     */
+    private boolean renewLeaseFromCache(long started) {
+        if (started <= 0 || started > Long.MAX_VALUE - LEASE_NS) return false;
+        synchronized (lock) {
+            if (retired || published == null || published.values() == null) return false;
+            published = new Published(published.values(), epoch, revision, started + LEASE_NS);
+        }
+        return true;
     }
 
     private boolean refresh(long attempt, long started) {

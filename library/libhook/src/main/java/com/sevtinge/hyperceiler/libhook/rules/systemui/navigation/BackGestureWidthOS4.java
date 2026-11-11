@@ -2,10 +2,6 @@ package com.sevtinge.hyperceiler.libhook.rules.systemui.navigation;
 
 import android.content.SharedPreferences;
 import android.content.Context;
-import android.database.ContentObserver;
-import android.database.Cursor;
-import android.net.Uri;
-import android.os.AsyncTask;
 import java.util.ArrayList;
 import java.util.concurrent.atomic.AtomicLong;
 import android.os.Handler;
@@ -28,8 +24,6 @@ public final class BackGestureWidthOS4 extends BaseHook {
     private volatile boolean closed;
     private Context context;
     private final AtomicLong request = new AtomicLong();
-    private static final Uri ROOT = Uri.parse("content://com.sevtinge.hyperceiler.provider.sharedprefs");
-    private static final Uri WIDTH = Uri.withAppendedPath(ROOT, "integer/prefs_key_home_navigation_back_area_width/100");
     private final Handler main = new Handler(Looper.getMainLooper());
     @Override public void init() {
         Class<?> type = findClassIfExists("com.android.systemui.navigationbar.gestural.EdgeBackGestureHandler");
@@ -57,7 +51,7 @@ public final class BackGestureWidthOS4 extends BaseHook {
             SharedPreferences.OnSharedPreferenceChangeListener listener = (p, key) -> {
                 if (key == null || key.equals("home_navigation_back_area_width")
                     || key.equals("prefs_key_home_navigation_back_area_width")) {
-                    main.post(() -> { if (closed) return; requestProvider(); });
+                    main.post(() -> { if (closed) return; refreshFromPrefs(); });
                 }
             };
             prefs.registerOnSharedPreferenceChangeListener(listener);
@@ -71,32 +65,22 @@ public final class BackGestureWidthOS4 extends BaseHook {
         if (closed || context != null) return;
         context = c.getApplicationContext();
         if (context == null) context = c;
-        ContentObserver observer = new ContentObserver(main) {
-            @Override public void onChange(boolean selfChange, Uri uri) {
-                if (!closed && (uri == null || uri.toString().contains("home_navigation_back_area_width"))) requestProvider();
-            }
-        };
-        context.getContentResolver().registerContentObserver(ROOT, true, observer);
-        registerContentObserverHotReloadCleanup(context.getContentResolver(), observer);
-        requestProvider();
+        // No provider observer here. A ContentObserver on the module provider keeps a live
+        // connection from SystemUI, and the platform re-acquires it after every restart - which
+        // is exactly what turns a provider-only cold start into a kill/restart cycle. The remote
+        // preferences listener registered in init() already reports every change.
+        refreshFromPrefs();
     }
-    // Provider is the page's committed truth; LSPosed's startup snapshot may be stale.
-    // Query only on attach/pref events, off UI thread, never on MotionEvent.
-    private void requestProvider() {
+    // Remote preferences are already in this process: the value is read locally instead of
+    // querying the module provider, which is a cross-process call into an app the platform
+    // freezes within seconds.
+    private void refreshFromPrefs() {
         if (closed) return;
-        Context c = context;
-        if (c == null) { percent = readPercent(); refreshAll(); return; }
         long version = request.incrementAndGet();
-        AsyncTask.THREAD_POOL_EXECUTOR.execute(() -> {
-            int value;
-            try (Cursor cursor = c.getContentResolver().query(WIDTH, null, null, null, null)) {
-                if (cursor == null || !cursor.moveToFirst()) return;
-                value = BackGestureWidthState.normalize(cursor.getInt(0));
-            } catch (Throwable ignored) { return; } // retain last successful value
-            main.post(() -> {
-                if (closed || request.get() != version) return;
-                percent = value; refreshAll();
-            });
+        int value = readPercent();
+        main.post(() -> {
+            if (closed || request.get() != version) return;
+            percent = value; refreshAll();
         });
     }
     private int readPercent() {

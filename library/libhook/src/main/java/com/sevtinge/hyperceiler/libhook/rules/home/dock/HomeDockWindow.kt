@@ -740,8 +740,15 @@ class HomeDockWindow : BaseHook() {
             // changed parameter. It is what makes an edit survive a desktop restart: the restart
             // rebuilds the WindowState and traverses into here, but it never re-creates the hook.
             // The style query is asynchronous and throttled; its result lands on a later traversal.
-            glassClient.refreshRevealStyle()
-            glassClient.refreshGeometry()
+            // The style and geometry queries only matter when a dock glass layer exists. With the
+            // feature switched off there is no layer, yet each query is still a cross-process read
+            // into the module app - which the platform freezes seconds after the provider-only
+            // cold start, refuses, and then kills as an unstable provider. Gate on actual layer
+            // ownership instead of on a preference so the bootstrap path below keeps working.
+            if (synchronized(layers) { layers.isNotEmpty() }) {
+                glassClient.refreshRevealStyle()
+                glassClient.refreshGeometry()
+            }
             refreshSettings()
             val title = attrs.title.toString()
             synchronized(layers) {

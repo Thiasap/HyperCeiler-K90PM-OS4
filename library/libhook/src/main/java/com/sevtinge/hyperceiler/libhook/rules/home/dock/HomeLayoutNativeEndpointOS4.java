@@ -2,7 +2,6 @@
 package com.sevtinge.hyperceiler.libhook.rules.home.dock;
 
 import android.content.ContentResolver;
-import android.database.ContentObserver;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.IBinder;
@@ -242,36 +241,37 @@ public final class HomeLayoutNativeEndpointOS4 {
             if (refresher != null || paused) return;
             final long epoch = refreshEpoch;
             refresher = new Thread(() -> {
-                ContentResolver resolver = null;
-                ContentObserver observer = null;
+                android.content.SharedPreferences remotePrefs = null;
+                android.content.SharedPreferences.OnSharedPreferenceChangeListener prefsListener = null;
                 long retry = INITIAL_RETRY_MS;
                 long lastQueryAtNanos = 0;
+                long lastProviderAtNanos = 0;
+                long lastProviderNotificationVersion = 0;
                 try {
                     try {
-                        final android.content.Context context =
-                            com.sevtinge.hyperceiler.libhook.utils.api.ContextUtils.getContextNoError(
-                                com.sevtinge.hyperceiler.libhook.utils.api.ContextUtils.FlAG_ONLY_ANDROID);
-                        if (context != null) {
-                            resolver = context.getContentResolver();
-                        }
-                        if (resolver != null) {
-                            final ContentObserver candidate = new ContentObserver(null) {
-                                @Override public void onChange(boolean selfChange, Uri uri) {
-                                    if (!isLayoutChange(uri)) return;
+                        // Push, not poll. The provider observer used to be the change signal, but
+                        // registering it pins a live connection to the module app from
+                        // system_server, and the platform re-acquires that connection after each
+                        // restart. Remote preferences are delivered by LSPosed inside this
+                        // process, so a settings edit still reaches the endpoint without touching
+                        // the provider until an actual change arrives.
+                        final android.content.SharedPreferences prefs = PrefsBridge.getSharedPreferences();
+                        if (prefs != null) {
+                            final android.content.SharedPreferences.OnSharedPreferenceChangeListener candidate =
+                                (changed, key) -> {
                                     synchronized (refresherLock) {
                                         ++notificationVersion;
                                         invalidateCombinedLocked();
                                         refresherLock.notifyAll();
                                     }
-                                }
-                            };
-                            resolver.registerContentObserver(Uri.parse(
-                                "content://" + PREFS_AUTHORITY + "/pref"), true, candidate);
-                            observer = candidate;
+                                };
+                            prefs.registerOnSharedPreferenceChangeListener(candidate);
+                            remotePrefs = prefs;
+                            prefsListener = candidate;
                         }
                     } catch (RuntimeException | Error unavailable) {
-                        // A broken content service must not crash system_server's worker.
-                        // Unobserved systems continue with a bounded five-second fallback.
+                        // A broken preferences channel must not crash system_server's worker.
+                        // The endpoint keeps serving the last published snapshot.
                     }
                     for (;;) {
                         final long beforeQuery;
@@ -289,8 +289,25 @@ public final class HomeLayoutNativeEndpointOS4 {
                             }
                             beforeQuery = notificationVersion;
                         }
-                        final boolean success = refreshFromProvider();
+                        final boolean needProvider;
+                        synchronized (refresherLock) {
+                            // Push only: the remote-preferences listener above is the sole trigger
+                            // after the first read. A periodic provider read would land on a
+                            // provider-only process the platform has already frozen, which is what
+                            // turns the five-second lease into a five-second kill/restart cycle.
+                            needProvider = notificationVersion != lastProviderNotificationVersion
+                                || lastProviderAtNanos == 0;
+                        }
+                        final boolean success = needProvider
+                            ? refreshFromProvider()
+                            : renewLeaseFromCache(SystemClock.elapsedRealtimeNanos());
                         lastQueryAtNanos = System.nanoTime();
+                        if (needProvider) {
+                            lastProviderAtNanos = SystemClock.elapsedRealtimeNanos();
+                            synchronized (refresherLock) {
+                                lastProviderNotificationVersion = notificationVersion;
+                            }
+                        }
                         final long period;
                         if (success) {
                             retry = INITIAL_RETRY_MS;
@@ -309,9 +326,9 @@ public final class HomeLayoutNativeEndpointOS4 {
                 } catch (InterruptedException cancelled) {
                     Thread.currentThread().interrupt();
                 } finally {
-                    if (resolver != null && observer != null) {
-                        try { resolver.unregisterContentObserver(observer); }
-                        catch (RuntimeException | Error unavailable) { /* Retiring after provider death. */ }
+                    if (remotePrefs != null && prefsListener != null) {
+                        try { remotePrefs.unregisterOnSharedPreferenceChangeListener(prefsListener); }
+                        catch (RuntimeException | Error unavailable) { /* Retiring with the process. */ }
                     }
                     synchronized (refresherLock) {
                         if (refresher == Thread.currentThread()) refresher = null;
@@ -356,6 +373,28 @@ public final class HomeLayoutNativeEndpointOS4 {
     }
 
     /** One Binder query / one physical settings revision, including an explicit empty reset. */
+    /**
+     * Re-publishes the immutable snapshot already in memory with a fresh lease, without a
+     * cross-process provider read.
+     *
+     * Values, decoded layout, revision and the framework fingerprint are carried over unchanged,
+     * so this only extends the authorization window of a configuration that has not been reported
+     * as changed. Any real change still goes through {@link #refreshFromProvider()}, which is what
+     * keeps a stale value from being re-authorized indefinitely.
+     */
+    private static boolean renewLeaseFromCache(long started) {
+        synchronized (refresherLock) {
+            if (paused) return false;
+            final PublishedSnapshot current = combinedPublished;
+            if (current == null || current.values() == null || current.layout() == null) return false;
+            combinedPublished = new PublishedSnapshot(current.values(), current.reason(),
+                current.framework(), current.layout(), current.epoch(), current.revision(),
+                started + HYOS_MAX_SNAPSHOT_AGE_NANOS);
+            hyosSnapshotAtNanos = System.nanoTime();
+        }
+        return true;
+    }
+
     static boolean refreshFromProvider() {
         final long epoch;
         final long ticket;
