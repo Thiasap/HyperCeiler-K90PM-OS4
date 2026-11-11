@@ -3,6 +3,7 @@ package com.sevtinge.hyperceiler.libhook.rules.home.gesture;
 
 import android.app.Application;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.database.ContentObserver;
 import android.database.Cursor;
 import android.net.Uri;
@@ -14,6 +15,7 @@ import android.os.SystemClock;
 import android.view.InputDevice;
 import android.view.InputEvent;
 import android.view.MotionEvent;
+import com.sevtinge.hyperceiler.common.utils.PrefsBridge;
 import com.sevtinge.hyperceiler.libhook.base.BaseHook;
 import com.sevtinge.hyperceiler.libhook.base.OriginalArgumentsHook;
 import com.sevtinge.hyperceiler.libhook.utils.api.ContextUtils;
@@ -33,6 +35,7 @@ import java.util.WeakHashMap;
 public final class HomeQuickSwitchSystemUIOS4 extends BaseHook {
     private static final String TAG_LOG="HyperCeiler.QuickSystemUI";
     private static final Uri ROOT=Uri.parse("content://com.sevtinge.hyperceiler.provider.sharedprefs");
+    private static final String QUICK="home_navigation_quick_back";
     private final Object guard=new Object();
     private final Map<Object,HomeQuickSwitchState> receivers=new WeakHashMap<>();
     private final Map<Object,HomeQuickSwitchState> trackers=new IdentityHashMap<>();
@@ -47,6 +50,9 @@ public final class HomeQuickSwitchSystemUIOS4 extends BaseHook {
     private volatile long revision;
     private Context context;
     private Handler worker;
+    private volatile ContentObserver observer;
+    private volatile SharedPreferences remote;
+    private volatile SharedPreferences.OnSharedPreferenceChangeListener listener;
 
     @Override protected boolean useDexKit() { return true; }
     @Override protected boolean initDexKit() {
@@ -222,15 +228,58 @@ public final class HomeQuickSwitchSystemUIOS4 extends BaseHook {
     private synchronized void install(Context app) {
         if(closed||worker!=null||!"com.android.systemui".equals(app.getPackageName()))return;
         context=app;HandlerThread thread=new HandlerThread("HC-QuickSwitch");thread.start();worker=new Handler(thread.getLooper());
-        ContentObserver observer=new ContentObserver(worker){@Override public void onChange(boolean self){refresh();}};
-        app.getContentResolver().registerContentObserver(ROOT,true,observer);worker.post(this::refresh);
-        registerHotReloadCleanup(()->{app.getContentResolver().unregisterContentObserver(observer);thread.quitSafely();});
+        registerHotReloadCleanup(()->{detachObserver();if(remote!=null&&listener!=null)try{remote.unregisterOnSharedPreferenceChangeListener(listener);}catch(RuntimeException ignored){}thread.quitSafely();});
+        watchGate();
+    }
+    // The provider observer and its query exist only while the quick-switch preference is on. The
+    // switch itself is pushed by LSPosed into this process, so a disabled feature never wakes the
+    // frozen module app (HyperOS records each read that lands on a frozen process as unstable).
+    private void watchGate() {
+        SharedPreferences prefs=null;
+        try {if(PrefsBridge.isHookProcess())prefs=PrefsBridge.getSharedPreferences();}catch(RuntimeException ignored){prefs=null;}
+        // An empty remote map means the push has not landed yet, not that the user disabled the
+        // feature: the key is written when it is enabled, so a real "off" still has it present as
+        // false. Treating unknown as off would silently break a working feature.
+        try {if(prefs!=null&&prefs.getAll().isEmpty())prefs=null;}catch(RuntimeException ignored){prefs=null;}
+        if(prefs!=null) {
+            SharedPreferences.OnSharedPreferenceChangeListener candidate=(changed,key)->{
+                if(key==null||(!key.equals(QUICK)&&!key.equals("prefs_key_"+QUICK)))return;
+                Handler target=worker;if(target!=null)target.post(this::syncObserver);
+            };
+            try {prefs.registerOnSharedPreferenceChangeListener(candidate);remote=prefs;listener=candidate;}
+            catch(RuntimeException ignored){prefs=null;remote=null;listener=null;}
+        }
+        // No remote channel: keep the unconditional provider path this hook always used.
+        if(prefs==null)worker.post(this::attachObserver);else worker.post(this::syncObserver);
+    }
+    private void syncObserver() {
+        if(closed)return;
+        boolean on=false;
+        try {on=PrefsBridge.getBoolean(QUICK,false);}catch(RuntimeException ignored){}
+        if(on)attachObserver();else detachObserver();
+    }
+    private void attachObserver() {
+        if(closed||context==null||observer!=null)return;
+        ContentObserver candidate=new ContentObserver(worker){@Override public void onChange(boolean self){refresh();}};
+        try {context.getContentResolver().registerContentObserver(ROOT,true,candidate);}
+        catch(RuntimeException unavailable){log("preference observer declined",unavailable);return;}
+        observer=candidate;refresh();
+    }
+    private void detachObserver() {
+        if(observer==null)return;
+        ContentObserver retired=observer;observer=null;
+        try {context.getContentResolver().unregisterContentObserver(retired);}catch(RuntimeException ignored){}
+        publish(false);
     }
     private void refresh() {
+        if(observer==null)return;
         boolean value=false;
         try(Cursor c=context.getContentResolver().query(Uri.withAppendedPath(ROOT,"home_gestures"),null,null,null,null)) {
             if(c!=null&&c.moveToFirst()&&c.getInt(0)==1){int i=c.getColumnIndex("home_navigation_quick_back");value=i>=0&&!c.isNull(i)&&c.getInt(i)==1;}
         }catch(Exception ex){log("snapshot declined",ex);}
+        publish(value);
+    }
+    private void publish(boolean value) {
         synchronized(guard){revision++;enabled=value;for(HomeQuickSwitchState s:receivers.values())s.retired=true;trackers.clear();receivers.clear();}
         log("config quick="+value+" revision="+revision,null);
     }

@@ -7,6 +7,7 @@ import android.app.Instrumentation;
 import android.app.KeyguardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.database.ContentObserver;
 import android.database.Cursor;
@@ -29,6 +30,7 @@ import android.view.InputEventReceiver;
 import android.view.InputMonitor;
 import android.view.MotionEvent;
 import android.view.ViewConfiguration;
+import com.sevtinge.hyperceiler.common.utils.PrefsBridge;
 import com.sevtinge.hyperceiler.libhook.base.BaseHook;
 import com.sevtinge.hyperceiler.libhook.provider.HomeGesturePrefsSnapshot;
 import com.sevtinge.hyperceiler.libhook.utils.api.ContextUtils;
@@ -40,6 +42,7 @@ import java.lang.reflect.Method;
 public final class HomeExtraGesturesOS4 extends BaseHook {
     private static final String TAG_LOG="HyperCeiler.ExtraGesture";
     private static final Uri ROOT=Uri.parse("content://com.sevtinge.hyperceiler.provider.sharedprefs");
+    private static final String MASTER="home_gesture_enable";
     private final Handler main=new Handler(Looper.getMainLooper());
     private final HomeExtraGestureState.Shake shake=new HomeExtraGestureState.Shake();
     private volatile boolean closed;
@@ -47,6 +50,9 @@ public final class HomeExtraGesturesOS4 extends BaseHook {
     private volatile long revision;
     private Context context;
     private Handler worker;
+    private volatile ContentObserver observer;
+    private volatile SharedPreferences remote;
+    private volatile SharedPreferences.OnSharedPreferenceChangeListener gateListener;
     private String fingerprint="";
     private HomeGestureRegionsOS4 regions;
     private HomeExtraGestureState touch;
@@ -73,9 +79,7 @@ public final class HomeExtraGesturesOS4 extends BaseHook {
         if(closed||worker!=null||!"com.android.systemui".equals(app.getPackageName()))return;
         context=app;
         HandlerThread thread=new HandlerThread("HC-ExtraGesture");thread.start();worker=new Handler(thread.getLooper());
-        ContentObserver observer=new ContentObserver(worker){@Override public void onChange(boolean self){refresh();}};
-        app.getContentResolver().registerContentObserver(ROOT,true,observer);
-        registerHotReloadCleanup(()->{app.getContentResolver().unregisterContentObserver(observer);thread.quitSafely();});
+        registerHotReloadCleanup(()->{detachObserver();if(remote!=null&&gateListener!=null)try{remote.unregisterOnSharedPreferenceChangeListener(gateListener);}catch(RuntimeException ignored){}thread.quitSafely();});
         main.post(()->{
             if(closed)return;
             try {
@@ -95,9 +99,11 @@ public final class HomeExtraGesturesOS4 extends BaseHook {
                 tick.run();
             }catch(Exception ex){log("platform contract declined",ex);}
         });
-        worker.post(this::refresh);worker.post(pollHome);
+        worker.post(pollHome);
+        watchGate();
     }
     private void refresh() {
+        if(observer==null)return;
         int next=0;StringBuilder stamp=new StringBuilder();
         try(Cursor c=context.getContentResolver().query(Uri.withAppendedPath(ROOT,"home_gestures"),null,null,null,null)) {
             if(c==null||!c.moveToFirst()||c.getInt(0)!=1)throw new IllegalStateException("gesture snapshot unavailable");
@@ -109,10 +115,52 @@ public final class HomeExtraGesturesOS4 extends BaseHook {
                 if(action>0&&action<=100)next|=1<<(i-5);
             }
         }catch(Exception ex){stamp.setLength(0);log("configuration declined",ex);}
-        int value=next;String identity=stamp.toString();
+        publish(next,stamp.toString());
+    }
+    private void publish(int value,String identity) {
         main.post(()->{if(closed||fingerprint.equals(identity))return;fingerprint=identity;mask=value;revision++;
             if(touch!=null)touch.reset();shake.reset();main.removeCallbacks(longPress);main.removeCallbacks(tick);if(touch!=null)tick.run();
             log("config mask="+mask+" revision="+revision,null);});
+    }
+    // The provider observer and its query exist only while the master switch is on. The switch
+    // itself is pushed by LSPosed into this process, so a disabled feature never wakes the frozen
+    // module app (HyperOS records each read that lands on a frozen process as unstable).
+    private void watchGate() {
+        SharedPreferences prefs=null;
+        try {if(PrefsBridge.isHookProcess())prefs=PrefsBridge.getSharedPreferences();}catch(RuntimeException ignored){prefs=null;}
+        // An empty remote map means the push has not landed yet, not that the user disabled the
+        // feature: every preference this hook reads is written on enable, so a real "off" still has
+        // the key present as false. Treating unknown as off would silently break a working feature.
+        try {if(prefs!=null&&prefs.getAll().isEmpty())prefs=null;}catch(RuntimeException ignored){prefs=null;}
+        if(prefs!=null) {
+            SharedPreferences.OnSharedPreferenceChangeListener candidate=(changed,key)->{
+                if(key==null||(!key.equals(MASTER)&&!key.equals("prefs_key_"+MASTER)))return;
+                Handler target=worker;if(target!=null)target.post(this::syncObserver);
+            };
+            try {prefs.registerOnSharedPreferenceChangeListener(candidate);remote=prefs;gateListener=candidate;}
+            catch(RuntimeException ignored){prefs=null;remote=null;gateListener=null;}
+        }
+        // No remote channel: keep the unconditional provider path this hook always used.
+        if(prefs==null)worker.post(this::attachObserver);else worker.post(this::syncObserver);
+    }
+    private void syncObserver() {
+        if(closed)return;
+        boolean on=false;
+        try {on=PrefsBridge.getBoolean(MASTER,false);}catch(RuntimeException ignored){}
+        if(on)attachObserver();else detachObserver();
+    }
+    private void attachObserver() {
+        if(closed||context==null||observer!=null)return;
+        ContentObserver candidate=new ContentObserver(worker){@Override public void onChange(boolean self){refresh();}};
+        try {context.getContentResolver().registerContentObserver(ROOT,true,candidate);}
+        catch(RuntimeException unavailable){log("preference observer declined",unavailable);return;}
+        observer=candidate;refresh();
+    }
+    private void detachObserver() {
+        if(observer==null)return;
+        ContentObserver retired=observer;observer=null;
+        try {context.getContentResolver().unregisterContentObserver(retired);}catch(RuntimeException ignored){}
+        publish(0,"");
     }
     private final Runnable pollHome=new Runnable(){@Override public void run(){
         if(closed)return;

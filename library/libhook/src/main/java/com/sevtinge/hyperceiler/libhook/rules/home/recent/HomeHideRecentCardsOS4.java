@@ -3,6 +3,7 @@ package com.sevtinge.hyperceiler.libhook.rules.home.recent;
 
 import android.app.Application;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.database.ContentObserver;
 import android.database.Cursor;
 import android.net.Uri;
@@ -10,6 +11,7 @@ import android.os.Binder;
 import android.os.IInterface;
 import android.os.SystemClock;
 import com.sevtinge.hyperceiler.common.log.ModuleLog;
+import com.sevtinge.hyperceiler.common.utils.PrefsBridge;
 import com.sevtinge.hyperceiler.libhook.base.BaseHook;
 import com.sevtinge.hyperceiler.libhook.base.OriginalArgumentsHook;
 import com.sevtinge.hyperceiler.libhook.provider.HomeLayoutPrefsSnapshot;
@@ -49,6 +51,9 @@ public final class HomeHideRecentCardsOS4 extends BaseHook {
     private Set<String> lastPackages = Set.of();
     private String lastFailure = "";
     private ContentObserver observer;
+    private volatile boolean observerRegistered, remoteGate;
+    private SharedPreferences remote;
+    private SharedPreferences.OnSharedPreferenceChangeListener listener;
     private Method query;
     private HomeRecentCardsFilter.Plan plan;
 
@@ -178,14 +183,61 @@ public final class HomeHideRecentCardsOS4 extends BaseHook {
                     }
                 }
             };
-            try {
-                context.getContentResolver().registerContentObserver(ROOT, true, observer);
-                requestRefresh();
-            } catch (Exception e) {
-                try { context.getContentResolver().unregisterContentObserver(observer); } catch (RuntimeException ignored) { }
-                context = null; failure("preference observer", e);
-            }
+            watchGate();
         }
+    }
+    // The provider observer exists only while the launcher actually has cards selected: with an
+    // empty selection the filter publishes stock behavior anyway, so a read would only wake the
+    // frozen module app. The selection itself is pushed by LSPosed into this process.
+    private void watchGate() {
+        if (listener != null) { syncObserver(); return; }
+        SharedPreferences prefs = null;
+        try { if (PrefsBridge.isHookProcess()) prefs = PrefsBridge.getSharedPreferences(); } catch (RuntimeException unavailable) { prefs = null; }
+        // An empty remote map means the push has not landed yet, not that the user cleared the
+        // selection: a cleared selection is pushed as an empty set, which still leaves the map
+        // populated by every other preference. Treating unknown as "nothing selected" would
+        // silently stop filtering for someone who has cards hidden.
+        try { if (prefs != null && prefs.getAll().isEmpty()) prefs = null; } catch (RuntimeException unavailable) { prefs = null; }
+        if (prefs != null) {
+            SharedPreferences.OnSharedPreferenceChangeListener candidate = (changed, key) -> {
+                if (key == null || !key.endsWith(HomeLayoutPrefsSnapshot.RECENT_CARDS_KEY)) return;
+                try { syncObserver(); } catch (RuntimeException | LinkageError unavailable) { failure("preference gate", unavailable); }
+            };
+            try { prefs.registerOnSharedPreferenceChangeListener(candidate); remote = prefs; listener = candidate; remoteGate = true; }
+            catch (RuntimeException unavailable) { remote = null; listener = null; prefs = null; }
+        }
+        // No remote channel: keep the unconditional provider path this hook always used.
+        if (prefs == null) attachObserver(); else syncObserver();
+    }
+    private void syncObserver() {
+        synchronized (contextGate) {
+            if (closed || context == null) return;
+            if (gate()) attachObserver(); else detachObserver();
+        }
+    }
+    private boolean gate() {
+        try {
+            Set<String> cards = PrefsBridge.getStringSet(HomeLayoutPrefsSnapshot.RECENT_CARDS_KEY);
+            return cards != null && !cards.isEmpty();
+        } catch (RuntimeException unavailable) { return false; }
+    }
+    private void attachObserver() {
+        if (closed || context == null || observerRegistered) return;
+        try {
+            context.getContentResolver().registerContentObserver(ROOT, true, observer);
+            observerRegistered = true;
+            requestRefresh();
+        } catch (Exception e) {
+            try { context.getContentResolver().unregisterContentObserver(observer); } catch (RuntimeException ignored) { }
+            context = null; failure("preference observer", e);
+        }
+    }
+    private void detachObserver() {
+        if (!observerRegistered) return;
+        observerRegistered = false;
+        Context current = context;
+        if (current != null) try { current.getContentResolver().unregisterContentObserver(observer); } catch (RuntimeException ignored) { }
+        requestRefresh();
     }
     private void requestRefresh() {
         if (closed || context == null || !queued.compareAndSet(false, true)) return;
@@ -223,6 +275,8 @@ public final class HomeHideRecentCardsOS4 extends BaseHook {
         }
     }
     private Selection readSelection() {
+        // Nothing selected means nothing to filter: skip the provider read entirely.
+        if (remoteGate && !gate()) return offSelection();
         try (Cursor cursor = context.getContentResolver().query(Uri.withAppendedPath(ROOT, "home_layout"), null, null, null, null)) {
             if (cursor == null || !cursor.moveToFirst() || !"schema".equals(cursor.getColumnName(0))
                 || cursor.getInt(0) != HomeLayoutPrefsSnapshot.SCHEMA) return null;
@@ -238,6 +292,11 @@ public final class HomeHideRecentCardsOS4 extends BaseHook {
             return new Selection(packages, uid % 100000);
         } catch (Exception | LinkageError e) { failure("physical preferences unavailable", e); return null; }
     }
+    /** The selection an empty card set would publish, resolved without a provider read. */
+    private Selection offSelection() {
+        try { return new Selection(Set.of(), context.getPackageManager().getApplicationInfo("com.miui.home", 0).uid % 100000); }
+        catch (Exception | LinkageError unavailable) { return STOCK; }
+    }
     private synchronized void failure(String stage, Throwable error) {
         String value = stage + ":" + error.getClass().getSimpleName();
         if (lastFailure.equals(value)) return;
@@ -248,6 +307,12 @@ public final class HomeHideRecentCardsOS4 extends BaseHook {
         synchronized (contextGate) {
             Context current = context;
             if (current != null && observer != null) try { current.getContentResolver().unregisterContentObserver(observer); }
+            catch (RuntimeException ignored) { }
+            observerRegistered = false;
+            SharedPreferences preferences = remote;
+            SharedPreferences.OnSharedPreferenceChangeListener registered = listener;
+            remote = null; listener = null;
+            if (preferences != null && registered != null) try { preferences.unregisterOnSharedPreferenceChangeListener(registered); }
             catch (RuntimeException ignored) { }
         }
         listeners.clear(); synchronized (bound) { bound.clear(); }
