@@ -103,9 +103,21 @@ public class LogManager {
         if (provider != null) {
             setDeviceInfoProvider(provider);
         }
-        // Only a UI request supplies a synchronizer. Provider-only cold starts must
-        // not create a health-check thread that copies LSPosed logs or reads Logcat.
-        if (xposedLogSyncer != null && !sStatusManagerInitialized) {
+        // Provider-only cold starts retain log-level configuration, but do not
+        // launch historical log import or the logger health-check worker.
+        if (xposedLogSyncer == null) {
+            LogStatusManager.initializeConfiguration(context, context.getDataDir().getAbsolutePath());
+        } else {
+            startHealthCheck(context, xposedLogSyncer);
+        }
+    }
+
+    /**
+     * Starts the logger health check once; the caller decides whether this
+     * session also needs an LSPosed history import.
+     */
+    public static void startHealthCheck(Context context, @Nullable Runnable xposedLogSyncer) {
+        if (!sStatusManagerInitialized) {
             synchronized (LogManager.class) {
                 if (!sStatusManagerInitialized) {
                     LogStatusManager.init(
