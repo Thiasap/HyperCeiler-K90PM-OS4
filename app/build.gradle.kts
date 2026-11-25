@@ -34,9 +34,26 @@ fun runGitCommand(vararg args: String): String? = runCatching {
 }.getOrNull()
 
 fun loadPropertiesFromFile(fileName: String): Properties? =
-    rootProject.file(fileName).takeIf { it.exists() }?.let { file ->
-        Properties().apply { load(file.inputStream()) }
+    rootProject.file(fileName).takeIf { it.isFile }?.let { file ->
+        Properties().apply { file.inputStream().use { load(it) } }
     }
+
+// 提到顶层：afterEvaluate 里也要用（决定产物名是否带 -debug），而 android {} 里声明的东西出不了那个 lambda。
+val signingProperties: Properties? by lazy { loadPropertiesFromFile("signing.properties") }
+
+fun signingValue(propertyName: String, environmentName: String): String? =
+    signingProperties?.getProperty(propertyName)?.takeIf { it.isNotBlank() }
+        ?: providers.environmentVariable(environmentName).orNull?.takeIf { it.isNotBlank() }
+
+// 四个值全齐才算配置了真签名；任何一项缺失，AGP 都会退回 "debug" 签名配置（CN=Android Debug）。
+val hasCustomSigning: Boolean by lazy {
+    listOf(
+        "storeFile" to "STORE_FILE",
+        "storePassword" to "STORE_PASSWORD",
+        "keyAlias" to "KEY_ALIAS",
+        "keyPassword" to "KEY_PASSWORD",
+    ).all { (property, environment) -> signingValue(property, environment) != null }
+}
 
 android {
     namespace = "com.sevtinge.hyperceiler"
@@ -49,7 +66,7 @@ android {
         minSdk = 35
         targetSdk = 37
         versionCode = gitVersionCode
-        versionName = "2.10.166"
+        versionName = "2.11.170"
 
         val buildTime = SimpleDateFormat("yyyy-MM-dd HH:mm:ss").apply {
             timeZone = TimeZone.getTimeZone("Asia/Shanghai")
@@ -107,12 +124,6 @@ android {
         }
     }
 
-    val properties: Properties? = loadPropertiesFromFile("signing.properties")
-    fun getString(propertyName: String, environmentName: String, prompt: String): String =
-        properties?.getProperty(propertyName)
-            ?: System.getenv(environmentName)
-            ?: System.console()?.readLine("\n$prompt: ").orEmpty()
-
     val buildTimeSuffix: String by lazy {
         SimpleDateFormat("MMddHHmm").apply {
             timeZone = TimeZone.getTimeZone("Asia/Shanghai")
@@ -122,25 +133,24 @@ android {
         DateTimeFormatter.ofPattern("yyyyMMdd").format(LocalDateTime.now())
     }
 
-    signingConfigs {
-        create("hasProperties") {
-            if (properties != null) {
-                storeFile = file(getString("storeFile", "STORE_FILE", "Store file"))
-                storePassword = getString("storePassword", "STORE_PASSWORD", "Store password")
-                keyAlias = getString("keyAlias", "KEY_ALIAS", "Key alias")
-                keyPassword = getString("keyPassword", "KEY_PASSWORD", "Key password")
-            }
+    val customSigningConfig = if (hasCustomSigning) {
+        signingConfigs.create("hasProperties") {
+            storeFile = file(signingValue("storeFile", "STORE_FILE")!!)
+            storePassword = signingValue("storePassword", "STORE_PASSWORD")
+            keyAlias = signingValue("keyAlias", "KEY_ALIAS")
+            keyPassword = signingValue("keyPassword", "KEY_PASSWORD")
             enableV1Signing = true
             enableV2Signing = true
             enableV3Signing = true
             enableV4Signing = true
         }
+    } else {
+        null
     }
 
     buildTypes {
         val configSigning: ApplicationBuildType.() -> Unit = {
-            val signingConfigName = if (properties != null) "hasProperties" else "debug"
-            signingConfig = signingConfigs.findByName(signingConfigName)
+            signingConfig = customSigningConfig ?: signingConfigs.getByName("debug")
         }
 
         val applyBase: ApplicationBuildType.() -> Unit = {
@@ -170,16 +180,19 @@ android {
         }
 
         debug {
+            configSigning()
             isMinifyEnabled = false
             buildConfigField("String", "GIT_HASH", "\"$gitHashLong\"")
             buildConfigField("String", "GIT_CODE", "\"$gitVersionCode\"")
             versionNameSuffix = "-${buildTimeSuffix}-r${gitVersionCode}"
-            if (properties != null) {
-                signingConfig = signingConfigs.findByName("hasProperties")
-            }
         }
     }
 
+    lint {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(25)
+        }
+    }
 }
 
 afterEvaluate {
@@ -190,7 +203,14 @@ afterEvaluate {
             ?.replace("assemble", "", ignoreCase = true)
             ?.lowercase() ?: "debug"
         val suffix = android.buildTypes.findByName(buildTypeName)?.versionNameSuffix ?: ""
-        archivesName.set("$apkId-${android.defaultConfig.versionName}$suffix")
+        // 没配置真签名时会退回 debug 密钥签名，在产物文件名上标注 -debug 以便一眼区分
+        val debugKeyTag = if (!hasCustomSigning && buildTypeName != "debug") {
+            logger.warn("signing.properties 不存在或四项签名值不全，$buildTypeName 产物将使用 debug 密钥签名，文件名带 -debug 标记")
+            "-debug"
+        } else {
+            ""
+        }
+        archivesName.set("$apkId-${android.defaultConfig.versionName}$suffix$debugKeyTag")
     }
 }
 

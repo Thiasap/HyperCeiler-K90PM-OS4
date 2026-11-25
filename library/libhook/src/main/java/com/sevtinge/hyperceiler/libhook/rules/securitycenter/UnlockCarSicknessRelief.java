@@ -18,123 +18,142 @@
  */
 package com.sevtinge.hyperceiler.libhook.rules.securitycenter;
 
+import static com.sevtinge.hyperceiler.libhook.utils.api.DeviceHelper.System.isMoreHyperOSVersion;
+
 import android.content.Context;
+import android.hardware.Sensor;
+import android.hardware.SensorManager;
+import android.provider.Settings;
 
 import com.sevtinge.hyperceiler.common.log.XposedLog;
 import com.sevtinge.hyperceiler.libhook.base.BaseHook;
-import com.sevtinge.hyperceiler.libhook.utils.hookapi.dexkit.IDexKit;
 
-import org.luckypray.dexkit.DexKitBridge;
 import org.luckypray.dexkit.query.FindMethod;
+import org.luckypray.dexkit.query.enums.OpCodeMatchType;
+import org.luckypray.dexkit.query.matchers.ClassMatcher;
 import org.luckypray.dexkit.query.matchers.MethodMatcher;
-import org.luckypray.dexkit.result.MethodData;
-import org.luckypray.dexkit.result.base.BaseData;
 
 import java.lang.reflect.Method;
+import java.util.List;
 
 public class UnlockCarSicknessRelief extends BaseHook {
+    private static final String SETTINGS_FRAGMENT =
+        "com.miui.carsickness.ui.CarSicknessReliefSettingsActivity$MotionSicknessReliefSettingsFragment";
+    private static final String REMIND_TIME_SETTING = "motion_sickness_relief_remind_time";
+    private static final int DRIVING_SENSOR_TYPE = 33171091;
+    private static final int REMIND_WHILE_DRIVING = 0;
+    private static final int REMIND_ALWAYS = 1;
+
     private Method mUnlockCarSicknessReliefMethod;
     private Method mUnlockCarSicknessRemindTimingMethod;
-    private Method mCarSicknessSupportMethod;
-    private Method mCarSicknessSupportEntryMethod;
+    private Method mGetRemindTimingMethod;
 
     @Override
     protected boolean useDexKit() {
         return true;
     }
 
-    /**
-     * OS4（安全中心 8.x）把防晕车重写进 com.miui.carsickness.*：
-     * - "is_support_carsick" 字符串已删除，旧查询 0 命中；
-     * - 「本机是否支持」变成 s6.b#h(Context)Z：设备白名单(d()) 或 FeatureParser
-     *   support_travel_comfort_solution(e()) 之一成立，且加速度/重力传感器齐全；
-     *   设置页 onCreatePreferences 里 b.i(context) 为 false 时会把「提醒时机」下拉直接移除，
-     *   b.h 则控制入口是否可用（l() 写入 Settings.Secure car_sickness_is_support）。
-     * - 白名单名单写死在 s6.b 的静态 List（f42422a），K90 Pro Max 不在里面，
-     *   所以把 h() / i() 强制 true 即可在本机解锁完整设置。
-     * 查询用 addInvoke 精确锚定 Ls6/b;->i(...)Z 的唯一调用点（设置页 onCreatePreferences），
-     * 避免按混淆类名 s6.b 硬匹配（混淆名跨版本会漂移）。
-     * 兼容旧系统：旧键 is_support_carsick 的查询保留为第一优先级。
-     */
     @Override
     protected boolean initDexKit() {
-        // 旧系统入口：HyperOS 2/3 用 "is_support_carsick" 定位，保留第一优先级。
-        mUnlockCarSicknessReliefMethod = optionalMember("UnlockCarSicknessRelief", new IDexKit() {
-            @Override
-            public BaseData dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
-                MethodData methodData = bridge.findMethod(FindMethod.create()
-                        .matcher(MethodMatcher.create()
-                            .usingStrings("is_support_carsick")
-                            .returnType(boolean.class)
-                            .paramTypes(Context.class)))
-                    .singleOrNull();
-                return methodData;
-            }
-        });
-        mUnlockCarSicknessRemindTimingMethod = optionalMember("UnlockCarSicknessRemindTiming", new IDexKit() {
-            @Override
-            public BaseData dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
-                MethodData methodData = bridge.findMethod(FindMethod.create()
-                        .matcher(MethodMatcher.create()
-                            .addCaller(MethodMatcher.create()
-                                .declaredClass(findClassIfExists("com.miui.carsickness.ui.CarSicknessReliefSettingsActivity$MotionSicknessReliefSettingsFragment"))
-                                .name("onCreatePreferences"))
-                            .returnType(boolean.class)
-                            .paramTypes(Context.class)))
-                    .singleOrNull();
-                return methodData;
-            }
-        });
-        // OS4 入口：两个查询都失配时，按新实现重新定位（防止上面的 optional 匹配把失配掩盖掉）。
-        if (mUnlockCarSicknessReliefMethod == null && mUnlockCarSicknessRemindTimingMethod == null) {
-            mCarSicknessSupportMethod = optionalMember("CarSicknessSupportOs4", new IDexKit() {
-                @Override
-                public BaseData dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
-                    MethodData methodData = bridge.findMethod(FindMethod.create()
-                            .matcher(MethodMatcher.create()
-                                .addInvoke("Ls6/b;->h(Landroid/content/Context;)Z")))
-                        .singleOrNull();
-                    return methodData;
-                }
-            });
-            mCarSicknessSupportEntryMethod = optionalMember("CarSicknessSupportEntryOs4", new IDexKit() {
-                @Override
-                public BaseData dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
-                    MethodData methodData = bridge.findMethod(FindMethod.create()
-                            .matcher(MethodMatcher.create()
-                                .addInvoke("Ls6/b;->i(Landroid/content/Context;)Z")))
-                        .singleOrNull();
-                    return methodData;
-                }
-            });
+        if (isMoreHyperOSVersion(4f)) {
+            initDexKitOS4();
+            return true;
         }
+
+        mUnlockCarSicknessReliefMethod = requiredMember("UnlockCarSicknessRelief", bridge ->
+            bridge.findMethod(FindMethod.create().matcher(MethodMatcher.create()
+                .usingStrings("is_support_carsick")
+                .returnType(boolean.class)
+                .paramTypes(Context.class))).singleOrNull());
+        mUnlockCarSicknessRemindTimingMethod = requiredMember("UnlockCarSicknessRemindTiming", bridge ->
+            bridge.findMethod(FindMethod.create().matcher(MethodMatcher.create()
+                .addCaller(MethodMatcher.create().declaredClass(SETTINGS_FRAGMENT).name("onCreatePreferences"))
+                .returnType(boolean.class)
+                .paramTypes(Context.class))).singleOrNull());
         return true;
+    }
+
+    private void initDexKitOS4() {
+        // 本 fork 保留上游的 OS4 结构不变量锚点（类内含 CarSicknessUtils / reminder 设置键 +
+        // 调 SensorManager.getDefaultSensor + 加速度/陀螺仪类型号 + Z(Context)），
+        // 但把它降为 optional：失配时只打 E、跳过本规则，不把 DexKit 异常泄给同一进程里的其他规则。
+        mUnlockCarSicknessReliefMethod = optionalMember("UnlockCarSicknessReliefOS4", bridge ->
+            bridge.findMethod(FindMethod.create().matcher(MethodMatcher.create()
+                .declaredClass(ClassMatcher.create().usingStrings("CarSicknessUtils", REMIND_TIME_SETTING))
+                .addInvoke("Landroid/hardware/SensorManager;->getDefaultSensor(I)Landroid/hardware/Sensor;")
+                .usingNumbers(Sensor.TYPE_LINEAR_ACCELERATION, Sensor.TYPE_GYROSCOPE)
+                .returnType(boolean.class)
+                .paramTypes(Context.class))).singleOrNull());
+        if (mUnlockCarSicknessReliefMethod == null) {
+            XposedLog.e(TAG, getPackageName(),
+                "UnlockCarSicknessRelief: OS4 支持性判定方法未匹配（CarSicknessUtils），防晕车解锁未生效");
+            return;
+        }
+
+        Class<?> utilsClass = mUnlockCarSicknessReliefMethod.getDeclaringClass();
+        mUnlockCarSicknessRemindTimingMethod = optionalMember("UnlockCarSicknessRemindTimingOS4", bridge ->
+            bridge.findMethod(FindMethod.create().matcher(MethodMatcher.create()
+                .declaredClass(utilsClass)
+                .addCaller(MethodMatcher.create()
+                    .declaredClass(SETTINGS_FRAGMENT)
+                    .name("onCreatePreferences")
+                    .usingStrings("remind_time_setting"))
+                .returnType(boolean.class)
+                .paramTypes(Context.class))).singleOrNull());
+        mGetRemindTimingMethod = optionalMember("GetCarSicknessRemindTimingOS4", bridge ->
+            bridge.findMethod(FindMethod.create().matcher(MethodMatcher.create()
+                .declaredClass(utilsClass)
+                .addCaller(MethodMatcher.create()
+                    .declaredClass(SETTINGS_FRAGMENT)
+                    .name("onPreferenceChange")
+                    .usingStrings("miui.carsickness.remind_always", "miui.carsickness.remind_driving"))
+                .addCaller(MethodMatcher.create()
+                    .declaredClass("com.miui.carsickness.service.CarSicknessService"))
+                .opNames(List.of("const/4", "return"), OpCodeMatchType.Equals)
+                .usingNumbers(REMIND_ALWAYS)
+                .returnType(int.class)
+                .paramTypes(Context.class))).singleOrNull());
     }
 
     @Override
     public void init() {
-        // 旧系统入口照旧
-        if (mUnlockCarSicknessReliefMethod != null) {
+        if (!isMoreHyperOSVersion(4f)) {
             hookMethod(mUnlockCarSicknessReliefMethod, returnConstant(true));
-        }
-        if (mUnlockCarSicknessRemindTimingMethod != null) {
             hookMethod(mUnlockCarSicknessRemindTimingMethod, returnConstant(true));
+            return;
         }
-        // OS4 入口：支持性判定强制 true，让设置页与入口完整可用
-        if (mCarSicknessSupportMethod != null) {
-            hookMethod(mCarSicknessSupportMethod, returnConstant(true));
+
+        if (mUnlockCarSicknessReliefMethod == null) {
+            // initDexKitOS4() 已经打过 E，这里不再重复
+            return;
         }
-        if (mCarSicknessSupportEntryMethod != null) {
-            hookMethod(mCarSicknessSupportEntryMethod, returnConstant(true));
+
+        chain(mUnlockCarSicknessReliefMethod, invocation -> {
+            if (Boolean.TRUE.equals(invocation.proceed())) return true;
+            Context context = (Context) invocation.getArg(0);
+            SensorManager sensors = context.getSystemService(SensorManager.class);
+            return sensors != null
+                && sensors.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION) != null
+                && sensors.getDefaultSensor(Sensor.TYPE_GYROSCOPE) != null;
+        });
+        if (mUnlockCarSicknessRemindTimingMethod == null || mGetRemindTimingMethod == null) return;
+
+        // This security center version writes the setting but its reader always returns REMIND_ALWAYS.
+        var timingReader = chain(mGetRemindTimingMethod, invocation -> {
+            Context context = (Context) invocation.getArg(0);
+            if (!supportsDrivingReminder(context)) return invocation.proceed();
+            int timing = Settings.System.getInt(context.getContentResolver(), REMIND_TIME_SETTING, REMIND_ALWAYS);
+            return timing == REMIND_WHILE_DRIVING ? REMIND_WHILE_DRIVING : REMIND_ALWAYS;
+        });
+        if (timingReader != null) {
+            chain(mUnlockCarSicknessRemindTimingMethod, invocation ->
+                supportsDrivingReminder((Context) invocation.getArg(0)) || Boolean.TRUE.equals(invocation.proceed()));
         }
-        // 新旧入口一个都没拿到时必须报 E：说明规则在新系统上完全失配，不允许静默跳过
-        if (mUnlockCarSicknessReliefMethod == null
-                && mUnlockCarSicknessRemindTimingMethod == null
-                && mCarSicknessSupportMethod == null
-                && mCarSicknessSupportEntryMethod == null) {
-            XposedLog.e(TAG, getPackageName(),
-                "UnlockCarSicknessRelief: 新旧入口均未匹配（is_support_carsick / s6.b#h / s6.b#i），防晕车解锁未生效");
-        }
+    }
+
+    private static boolean supportsDrivingReminder(Context context) {
+        SensorManager sensors = context.getSystemService(SensorManager.class);
+        return sensors != null && sensors.getDefaultSensor(DRIVING_SENSOR_TYPE, true) != null;
     }
 }
 

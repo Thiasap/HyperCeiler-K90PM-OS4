@@ -44,7 +44,13 @@ object CustomRefreshRate : BaseHook() {
             it.findMethod {
                 matcher {
                     addEqString("btn_preferce_category")
+                    // Hook 体是 args[0] = true，只有 boolean 入参、void 返回的那个才是类型正确的目标，
+                    // 所以按入参个数/类型与返回类型一起收紧（上游 483fb296a 的改法）。
+                    // 已在 OS3.0.319、OS4.0.0.44、OS4.0.5.0 三版反汇编上离线复算：
+                    // 三版均收敛为唯一命中（分别是 A(Z)V、C(Z)V、C(Z)V）。
                     paramCount = 1
+                    paramTypes("boolean")
+                    returnType = "void"
                 }
             }.single()
         }

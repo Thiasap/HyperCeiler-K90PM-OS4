@@ -24,16 +24,23 @@ import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 import com.sevtinge.hyperceiler.common.log.XposedLog
 import com.sevtinge.hyperceiler.libhook.base.BaseHook
-import io.github.lingqiqi5211.ezhooktool.core.findMethod
+import io.github.lingqiqi5211.ezhooktool.core.findMethodOrNull
 import io.github.lingqiqi5211.ezhooktool.xposed.common.HookParam
 import io.github.lingqiqi5211.ezhooktool.xposed.dsl.createAfterHook
 import io.github.lingqiqi5211.ezhooktool.xposed.dsl.createHook
 import io.github.lingqiqi5211.ezhooktool.xposed.dsl.setBooleanField
 import io.github.lingqiqi5211.ezhooktool.xposed.java.IMethodHook
+import org.luckypray.dexkit.query.enums.UsingType
+import org.luckypray.dexkit.query.matchers.FieldMatcher
+import org.luckypray.dexkit.result.FieldDataList
+import org.luckypray.dexkit.result.MethodDataList
 import java.lang.reflect.Field
 import java.lang.reflect.Method
 
 object DisableSafeModelTip : BaseHook() {
+
+    private const val HOLDER_CLASS =
+        "com.miui.packageInstaller.ui.listcomponets.SafeModeTipViewObject"
 
     private const val HINT_VIEW_OBJECT =
         "com.miui.packageInstaller.ui.listcomponets.FullSafeInstallHintViewObject"
@@ -57,9 +64,27 @@ object DisableSafeModelTip : BaseHook() {
     override fun useDexKit() = true
 
     private var disableSafeModelTipMethod: Method? = null
-    private var recyclerViewField: Field? = null
     private var unknownSourceCheckMethod: Method? = null
     private var unknownSourceDispatchMethod: Method? = null
+
+    // SafeModeTipViewObject 的父类是混淆类（OS4.0.4.0 上为 J2/b;），
+    // 它里面有 3 个 boolean 字段（混淆名 f / i / j），
+    // 旧的 .single() 结构上必然抛 NonUniqueResultException("unique result: 3")，
+    // 导致整条规则被跳过。改成取全量 boolean 字段，在绑定回调里逐个置 false。
+    // 注意不能挂 requiredMemberList：这条查询失败不应该连坐主开关与下面两个 OS4 适配。
+    private lateinit var recyclerViewFields: List<Field>
+
+    // init() 靠 hook「SafeModeTipViewObject 父类里写 boolean 字段的那个方法」来清除提示标记。
+    // dexdump 逐方法核验（audit/packageinstaller_appinfoupload_20261105.md）：
+    //   OS3     父类 com.miui.packageInstaller.ui.listcomponets.p 只有 p#a()V 会 iput-boolean（写 l）
+    //           -> 按名字找 a 正好命中，上游写法成立
+    //   OS4.0.5 父类被混淆成 J2/b：整个类**没有名为 a 的方法**（a 是个 PRIVATE FINAL 的
+    //           WeakReference 字段），写 boolean 字段的方法变成 J2/b#A(boolean)
+    //           -> findMethod 找不到方法是直接抛异常（不是返回空列表），init() 里前面的
+    //              disableSafeModelTipMethod 主 hook 已经装好，但抛异常之后的“清除标记”部分全部丢失
+    // 结构不变量是「父类中写本类 boolean 字段的 void 方法」，两版各只有一个（<init> 除外）。
+    // 因此这里额外用 DexKit 取该写手方法作为兜底，仅在按名字 a 找不到时使用，OS3 行为不变。
+    private var flagWriterMethods: List<Method> = emptyList()
 
     override fun initDexKit(): Boolean {
         disableSafeModelTipMethod = optionalMember("DisableSafeModelTip") {
@@ -69,19 +94,33 @@ object DisableSafeModelTip : BaseHook() {
                 }
             }.singleOrNull()
         }
-        // OS4 的 SafeModeTipViewObject 父类里有 3 个 boolean 字段，原来 .single() 会抛
-        // NonUniqueResultException: 3 并让整条规则失败。这里改成「取第一个，取不到就算了」，
-        // 主开关（上面的方法 hook）仍然生效。
-        recyclerViewField = optionalMember("RecyclerView") {
+        recyclerViewFields = optionalMemberList("RecyclerView") {
             it.findClass {
                 matcher {
-                    className = "com.miui.packageInstaller.ui.listcomponets.SafeModeTipViewObject"
+                    className = HOLDER_CLASS
                 }
-            }.findField {
+            }.single().superClass?.findField {
                 matcher {
                     type = "boolean"
                 }
-            }.firstOrNull()
+            } ?: FieldDataList()
+        }
+        flagWriterMethods = optionalMemberList("SafeModeTipFlagWriters") {
+            it.findClass {
+                matcher {
+                    className = HOLDER_CLASS
+                }
+            }.singleOrNull()?.superClass?.findMethod {
+                matcher {
+                    returnType = "void"
+                    addUsingField(
+                        FieldMatcher.create().apply { type = "boolean" },
+                        UsingType.Write
+                    )
+                }
+            }?.apply {
+                removeIf { isInitializer(it.name) }
+            } ?: MethodDataList()
         }
         // 「未知来源」确认的判定方法：方法体里读 intent 的 EXTRA_IS_TRUSTED_SOURCE，
         // 命中就把来源按「已信任」处理，不走弹窗分支。
@@ -103,26 +142,56 @@ object DisableSafeModelTip : BaseHook() {
                     paramTypes("int")
                     returnType = "void"
                 }
-            }.single()
+            }.singleOrNull()
         }
         return true
     }
 
     override fun init() {
-        disableSafeModelTipMethod?.createHook {
-            replace { false }
-        }
-
-        recyclerViewField?.let { field ->
-            runCatching {
-                field.declaringClass.findMethod { name("a") }.createAfterHook {
-                    it.thisObject.setBooleanField(field.name, false)
-                }
+        if (disableSafeModelTipMethod == null) {
+            XposedLog.e(TAG, packageName, "未找到 SafeModeTip 的主开关方法（android.provider.MiuiSettings\$Ad），安全模式提示开关未生效")
+        } else {
+            disableSafeModelTipMethod!!.createHook {
+                replace { false }
             }
         }
 
+        hookFlagWriterClear()
+
         skipUnknownSourceConfirm()
         hideNotCheckedSafetyHint()
+    }
+
+    // 构造成员也会被“写 boolean 字段”匹配到（OS4.0.5 的 J2/b#<init> 就写 f/i/j），
+    // 但 getMethodInstance() 对 <init> 会抛 "not a method"，所以在解析成反射对象之前剔除。
+    private fun isInitializer(name: String): Boolean =
+        name == "<init>" || name == "<clinit>"
+
+    // findMethod 找不到时会直接抛异常（不是返回空列表），所以这里用 findMethodOrNull；
+    // OS4.0.5 上父类根本没有名为 a 的方法，原写法在此抛 MemberNotFoundException，
+    // 使“清除提示标记”这后半段在 init() 阶段丢掉（前面的主 hook 已装好），规则被记为 Hook Failed。
+    private fun hookFlagWriterClear() {
+        val holderClass = recyclerViewFields.firstOrNull()?.declaringClass
+        if (holderClass == null) {
+            XposedLog.e(TAG, packageName, "$HOLDER_CLASS 父类里没有 boolean 标记字段，安全模式提示标记无法清除")
+            return
+        }
+        val byName = holderClass.findMethodOrNull { name("a") }
+        val gateMethods: List<Method> = listOfNotNull(byName).ifEmpty { flagWriterMethods }
+        if (gateMethods.isEmpty()) {
+            XposedLog.e(TAG, packageName, "${holderClass.name} 没有找到写 boolean 字段的方法，安全模式提示标记无法清除")
+            return
+        }
+        gateMethods.forEach { gate ->
+            gate.createAfterHook { param ->
+                val thisObject = param.thisObject
+                if (thisObject != null) {
+                    recyclerViewFields.forEach { field ->
+                        runCatching { thisObject.setBooleanField(field.name, false) }
+                    }
+                }
+            }
+        }
     }
 
     /**

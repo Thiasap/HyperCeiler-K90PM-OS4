@@ -1,21 +1,21 @@
 /*
-  * This file is part of HyperCeiler.
-
-  * HyperCeiler is free software: you can redistribute it and/or modify
-  * it under the terms of the GNU Affero General Public License as
-  * published by the Free Software Foundation, either version 3 of the
-  * License.
-
-  * This program is distributed in the hope that it will be useful,
-  * but WITHOUT ANY WARRANTY; without even the implied warranty of
-  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  * GNU Affero General Public License for more details.
-
-  * You should have received a copy of the GNU Affero General Public License
-  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
-  * Copyright (C) 2023-2026 HyperCeiler Contributions
-*/
+ * This file is part of HyperCeiler.
+ *
+ * HyperCeiler is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Copyright (C) 2023-2026 HyperCeiler Contributions
+ */
 package com.sevtinge.hyperceiler.libhook.rules.guardprovider;
 
 import com.sevtinge.hyperceiler.common.log.XposedLog;
@@ -58,6 +58,10 @@ public class DisableUploadAppListNew extends BaseHook {
      * <p>
      * 本 fork 以 OS4 为准：先查 OS4 的 updateAllDetectApps，它没命中时才回退旧的
      * AntiDefraudAppManager 查询（老系统仍按旧字符串命中）。
+     * <p>
+     * 注：上游 2e4de5e74 用「只拦自动上传、放行显式扫描」的 ThreadLocal 方案（额外再挂
+     * MiEngineNG 里的调用者）。本 fork 保留更严格的整段置空：单锚点、单方法，失败面更小，
+     * 且本机（HyperOS 4.0.6 / guardprovider 15.x）只验证过这一条锚点。
      */
     @Override
     protected boolean initDexKit() {
@@ -95,7 +99,7 @@ public class DisableUploadAppListNew extends BaseHook {
     public void init() {
         // 新逻辑优先：OS4 的 updateAllDetectApps 整段置空
         if (mUpdateAllDetectAppsMethod != null) {
-            XposedLog.d(TAG, getPackageName(), "Current hooking OS4 method is " + mUpdateAllDetectAppsMethod);
+            XposedLog.d(TAG, getPackageName(), "Hooking OS4 updateAllDetectApps: " + mUpdateAllDetectAppsMethod);
             hookMethod(mUpdateAllDetectAppsMethod, new IReplaceHook() {
                 @Override
                 public Object replace(HookParam param) {
@@ -106,7 +110,7 @@ public class DisableUploadAppListNew extends BaseHook {
         }
         // 旧逻辑兜底：老系统的 AntiDefraudAppManager
         if (mAntiDefraudAppManagerMethod != null) {
-            XposedLog.d(TAG, getPackageName(), "Current hooking method is " + mAntiDefraudAppManagerMethod);
+            XposedLog.d(TAG, getPackageName(), "Hooking legacy AntiDefraudAppManager: " + mAntiDefraudAppManagerMethod);
             hookMethod(mAntiDefraudAppManagerMethod, new IReplaceHook() {
                 @Override
                 public Object replace(HookParam param) {

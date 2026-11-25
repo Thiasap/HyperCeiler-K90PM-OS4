@@ -68,7 +68,8 @@ public class DisableRiskTip extends BaseHook {
      * YellowPagePhone)V（private static，2 参 void），而类名和协议类的类名都没有混淆，
      * 可以直接按「类名 + 方法名」定位，比字符串锚点稳。
      * <p>
-     * 这里两条旧查询原样保留（老系统仍按字符串命中），只是降为 optional 兜底；
+     * 现在 Method2 的 DexKit 查询改用「类名 + 方法名 + 精确入参类型 + void」的结构不变量
+     * （上游 93817d8f6 的改法）；两条查询都只是 optional 兜底，
      * OS4 的「类名 + 方法名」反射定位是<b>第一优先级</b>，全部失配时在 init() 里打 E 级日志，
      * 不再让整条规则连坐失效。
      */
@@ -89,9 +90,13 @@ public class DisableRiskTip extends BaseHook {
             public BaseData dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
                 MethodData methodData = bridge.findMethod(FindMethod.create()
                     .matcher(MethodMatcher.create()
-                        .usingStrings("fillYellowPageContact: ", "ContactFetcher")
+                        // 结构不变量（上游 93817d8f6）：类名 + 方法名 + 精确入参类型 + void。
+                        // 三版反汇编（OS3.0.319 / OS4.0.0.44 / OS4.0.5.0）里名字与签名均未漂。
+                        .declaredClass(CLASS_YELLOW_PAGE_CONTACT_FETCHER)
+                        .name(METHOD_FILL_YELLOW_PAGE_CONTACT)
+                        .paramTypes("com.miui.smsextra.sdk.SmartContact",
+                            "com.miui.smsextra.internal.sdk.xiaomi.YellowPagePhone")
                         .returnType(void.class)
-                        .paramCount(2)
                     )).singleOrNull();
                 return methodData;
             }

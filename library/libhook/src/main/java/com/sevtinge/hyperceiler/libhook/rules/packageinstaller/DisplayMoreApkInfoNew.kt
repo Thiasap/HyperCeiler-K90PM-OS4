@@ -62,9 +62,15 @@ object DisplayMoreApkInfoNew : BaseHook() {
     private var mAppInfoViewObject: Class<*>? = null
     private var mAppInfoViewObjectViewHolder: Class<*>? = null
 
+    // 以下五个查询共用同一个类锚。上游（93817d8f6 系列）用的是「包含字面量
+    // "context.ge…ta.versionName" 的类」，但该串是混淆产物：MIUIPackageInstaller 在 OS3 里
+    // 确实带这个串（含 U+2026 省略号），OS4.0.5 里已经不存在（dex 字节直查 HIT 1 → HIT 0）。
+    // 本 fork 改成不混淆的完整类名做锚，OS3/OS4 都能命中。
+    // 另外这些查询全部挂 optionalMember + singleOrNull：过去挂 required + .single() 时，
+    // 一个锚点失效就让整条规则被跳过（OS4.0.4.0 设备日志：NoResultException）；
+    // init() 里的反射回退也不再被「没拿到 viewHolderField 就直接 return」堵死（见 init() 处说明）。
     private val appInfoViewObjectName =
         $$"com.miui.packageInstaller.ui.listcomponets.AppInfoViewObject"
-
     private val viewExcludeMethod2 by lazy<Method?> {
         optionalMember("ViewExcludeMethod2") {
             it.findClass {
@@ -152,19 +158,19 @@ object DisplayMoreApkInfoNew : BaseHook() {
         // OS3 及更早：AppInfoViewObject 里有一个 ViewHolder 字段，DexKit 定位到的无参 view 方法
         //            通过 thisObject 取 ViewHolder；OS4 里这个字段没了，ViewHolder 由
         //            bind 方法（public void xxx(ViewHolder)）的 args[0] 传入，走下面 candidateMethods 分支。
-        val reallyViewMethod: Method? = if (viewHolderField != null) {
-            viewMethod.firstOrNull { it != viewExcludeMethod1 && it != viewExcludeMethod2 }
-        } else {
-            null
-        }
+        // pick the first view method that is not excluded
+        val reallyViewMethod: Method? = viewMethod.firstOrNull { it != viewExcludeMethod1 && it != viewExcludeMethod2 }
+
+        // 不能再按 viewHolderField 是否为 null 决定 reallyViewMethod：viewHolderField 在两版里
+        // 都声明在 AppInfoViewObject 的**子类**里（OS3 是 listcomponets/d#q、listcomponets/r#p，
+        // OS4.0.5 是 listcomponets/B#p、listcomponets/g#q），基类本身没有 ViewHolder 类型字段，
+        // 所以这条查询本来就可能落空。该字段只服务于 reallyViewMethod 分支，
+        // 回退分支（candidateMethods[0] + args[0]）不需要它，因此不再提前返回。
 
         // if we have a specific view method, ensure entry calls it
-        if (reallyViewMethod != null && entryMethod != null) {
-            val entry = entryMethod!!
-            reallyViewMethod.let { method ->
-                entry.createBeforeHook {
-                    callMethod(method.name)
-                }
+        reallyViewMethod?.let { method ->
+            entryMethod?.createBeforeHook {
+                callMethod(method.name)
             }
         }
 
@@ -195,6 +201,8 @@ object DisplayMoreApkInfoNew : BaseHook() {
             }
 
         val methodToHook = reallyViewMethod ?: candidateMethods[0]
+        // by lazy 委托属性不能智能转换，先取局部变量
+        val holderField = viewHolderField
         XposedLog.d(
             TAG,
             this.lpparam.packageName,
@@ -202,11 +210,15 @@ object DisplayMoreApkInfoNew : BaseHook() {
         )
 
         methodToHook.createAfterHook { hookParam ->
-            val holderInstance: Any = if (reallyViewMethod != null) {
-                hookParam.thisObject.getObjectField(viewHolderField!!.name) ?: return@createAfterHook
+            val holderInstance: Any? = if (reallyViewMethod != null && holderField != null) {
+                hookParam.thisObject.getObjectField(holderField.name)
             } else {
-                hookParam.args[0] ?: return@createAfterHook
+                // 挂的是基类 AppInfoViewObject 的 (ViewHolder)V 方法（OS3 叫 E、OS4.0.5 叫 D，
+                // 两版都是除构造器外唯一该方法），holder 直接取第一个参数；args 可能为空
+                // （挂在无参的 view 方法上时），用 getOrNull 避免越界。
+                hookParam.args.getOrNull(0)
             }
+            if (holderInstance == null) return@createAfterHook
 
             val mAppSizeTv = (holderInstance.callMethod("getTvAppVersion") as? TextView)
                 ?: (holderInstance.callMethod("getAppSize") as? TextView)

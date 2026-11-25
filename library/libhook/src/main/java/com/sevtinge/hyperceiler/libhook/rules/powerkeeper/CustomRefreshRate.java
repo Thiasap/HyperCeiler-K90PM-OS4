@@ -55,25 +55,44 @@ public class CustomRefreshRate extends BaseHook {
      * {@code DisplayFrameSetting.mIsCustomFpsSwitch}（String，"true" 表示开启自定义帧率）。
      * 因此 OS4 兜底改为 hook 它，并在 after 里把字段强制写成 "true"
      * —— 必须放在 after：原方法体本身就会写这个字段，写在 before 会被覆盖。
-     * 本 fork 以 OS4 为准：先查 parseCustomModeSwitchFromDb，它没命中时才回退旧的
-     * fucSwitch 查询；新旧都失配时打 E。
+     * <p>
+     * OS4 的目标方法先用「类名 + 方法名 + String 单参 + void」这个结构不变量定位
+     * （上游 93817d8f6 的改法，三版反汇编里该方法未混淆且唯一）；
+     * 万一以后改名，再退回「两串 AND + String 单参 + void」；
+     * 两条都没命中才回退旧系统的 fucSwitch 查询；全部失配时打 E。
      */
     @Override
     protected boolean initDexKit() {
-        // ① 新逻辑优先：OS4 的 parseCustomModeSwitchFromDb(String)
+        // ① 新逻辑优先：结构不变量定位 OS4 的 parseCustomModeSwitchFromDb(String)
         mParseCustomModeSwitchMethod = optionalMember("ParseCustomModeSwitchOs4", new IDexKit() {
             @Override
             public BaseData dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
                 MethodData methodData = bridge.findMethod(FindMethod.create()
                         .matcher(MethodMatcher.create()
-                            .usingEqStrings("custom_mode_switch", "fucSwitch")
-                            .paramTypes(String.class)
+                            .declaredClass("com.miui.powerkeeper.statemachine.DisplayFrameSetting")
+                            .name("parseCustomModeSwitchFromDb")
+                            .paramTypes("java.lang.String")
                             .returnType(void.class)
                         )).singleOrNull();
                 return methodData;
             }
         });
-        // ② 新锚点未命中才回退旧逻辑
+        // ② 方法改名时退回字符串锚点（语义与 ① 相同）
+        if (mParseCustomModeSwitchMethod == null) {
+            mParseCustomModeSwitchMethod = optionalMember("ParseCustomModeSwitchByString", new IDexKit() {
+                @Override
+                public BaseData dexkit(DexKitBridge bridge) throws ReflectiveOperationException {
+                    MethodData methodData = bridge.findMethod(FindMethod.create()
+                            .matcher(MethodMatcher.create()
+                                .usingEqStrings("custom_mode_switch", "fucSwitch")
+                                .paramTypes(String.class)
+                                .returnType(void.class)
+                            )).singleOrNull();
+                    return methodData;
+                }
+            });
+        }
+        // ③ 新锚点全部未命中才回退旧逻辑
         if (mParseCustomModeSwitchMethod == null) {
             mFucSwitchMethod = optionalMember("FucSwitch", new IDexKit() {
                 @Override
@@ -99,8 +118,9 @@ public class CustomRefreshRate extends BaseHook {
             hookMethod(mParseCustomModeSwitchMethod, new IMethodHook() {
                 @Override
                 public void after(HookParam param) {
-                    // mIsCustomFpsSwitch 是 static 字段，必须走静态写入；
-                    // 早前误用实例写入，after 每次都抛 NoSuchFieldException 而自定义帧率从未生效。
+                    // mIsCustomFpsSwitch 是 static String，必须走静态写入；
+                    // 上游用 setObjectField(param.getThisObject(), ...) 在 before 里预置，
+                    // 但本机实测实例写入会抛 NoSuchFieldException，且 before 里写的值会被原方法体覆盖。
                     setStaticObjectField(os4Owner, FIELD_CUSTOM_FPS_SWITCH, VALUE_ENABLED);
                     XposedLog.d(TAG, getPackageName(),
                         "mIsCustomFpsSwitch forced to \"" + VALUE_ENABLED + "\" after parseCustomModeSwitchFromDb");
