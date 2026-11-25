@@ -24,6 +24,7 @@ import android.content.Intent
 import android.util.ArrayMap
 import com.sevtinge.hyperceiler.common.log.XposedLog
 import com.sevtinge.hyperceiler.libhook.base.BaseHook
+import com.sevtinge.hyperceiler.libhook.utils.api.DeviceHelper.System.isMoreHyperOSVersion
 import io.github.lingqiqi5211.ezhooktool.core.findMethod
 import io.github.lingqiqi5211.ezhooktool.xposed.dsl.getObjectField
 import io.github.lingqiqi5211.ezhooktool.core.loadClass
@@ -71,34 +72,33 @@ class RemoveConversationBubbleSettingsRestriction : BaseHook() {
     /**
      * 算出「气泡白名单」要列出的包名。
      *
-     * 首选 MIUI 自己的 `MiuiMultiWindowUtils.getFreeformSuggestionList(Context)`；但它内部会走
-     * `MiuiMultiWindowAdapter.calFreeformSuggestionList`，里面要
-     *   ① `SecurityManager.getAllPrivacyApps(userId)`（MIUI 系统服务，普通进程多半没有权限）
-     *   ② `MiuiMultiWindowUtils.queryUsageStats()`（要 PACKAGE_USAGE_STATS）
-     *   ③ 若干 Settings.System/Secure 的读写
-     * 4.0.8.0 上在安全中心进程里必然会在这条链里抛（设备日志：`getFreeformSuggestionList start` 打出来了，
-     * 但 `end result` 永远没有），于是整段白名单构建被 catch 掉、功能等于没生效。
-     *
-     * 所以这里降级：MIUI 的算法不可用时，直接枚举「有桌面入口的应用」当作候选。
-     * 本规则的目的只是**去掉白名单限制**，候选来源换成 PackageManager 并不改变语义，
-     * 而且只依赖公开 API，不会再抛。两条路都空时才打 E。
+     * MIUI 的 `MiuiMultiWindowUtils.getFreeformSuggestionList(Context)` 内部会走
+     * `MiuiMultiWindowAdapter.calFreeformSuggestionList`，它拿 usageStats 里的历史包名逐个
+     * `getPackageInfo`，碰到已卸载的包就抛 `NameNotFoundException`（4.0.8.0 真机：`com.saily.android` /
+     * `im.angry.easyeuicc` / `com.loopsessions.spectrumanalyzer` / `com.k90pm.tuner`），
+     * 而且它自己会 `printStackTrace()`，一次开页就刷几十行 System.err。
+     * HyperOS 4 及以后直接跳过它，用「枚举有桌面入口的应用」——本规则的目的只是**去掉白名单限制**，
+     * 候选来源换成 PackageManager 不改变语义，而且只依赖公开 API、不会抛也不会刷栈。
+     * 旧系统（OS2/OS3）仍优先走 MIUI 自己的算法，行为不变。
      */
     @SuppressLint("PrivateApi")
     private fun suggestBubblePackages(context: Context): List<String> {
-        try {
-            val list = HiddenApiBypass.invoke(
-                Class.forName("android.util.MiuiMultiWindowUtils"),
-                null,
-                "getFreeformSuggestionList",
-                context
-            ) as? List<*>
-            val packages = list?.mapNotNull { it as? String }?.filter { it.isNotEmpty() }.orEmpty()
-            if (packages.isNotEmpty()) return packages
-            XposedLog.w(TAG, getPackageName(),
-                "getFreeformSuggestionList 返回空，回退到枚举可启动应用")
-        } catch (t: Throwable) {
-            XposedLog.w(TAG, getPackageName(),
-                "getFreeformSuggestionList 不可用（${t.javaClass.simpleName}: ${t.message}），回退到枚举可启动应用")
+        if (!isMoreHyperOSVersion(4f)) {
+            try {
+                val list = HiddenApiBypass.invoke(
+                    Class.forName("android.util.MiuiMultiWindowUtils"),
+                    null,
+                    "getFreeformSuggestionList",
+                    context
+                ) as? List<*>
+                val packages = list?.mapNotNull { it as? String }?.filter { it.isNotEmpty() }.orEmpty()
+                if (packages.isNotEmpty()) return packages
+                XposedLog.w(TAG, getPackageName(),
+                    "getFreeformSuggestionList 返回空，回退到枚举可启动应用")
+            } catch (t: Throwable) {
+                XposedLog.w(TAG, getPackageName(),
+                    "getFreeformSuggestionList 不可用（${t.javaClass.simpleName}: ${t.message}），回退到枚举可启动应用")
+            }
         }
 
         val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)

@@ -13,6 +13,7 @@ import android.util.Log;
 
 import com.sevtinge.hyperceiler.common.log.XposedLog;
 import com.sevtinge.hyperceiler.libhook.base.PackageTarget;
+import com.sevtinge.hyperceiler.libhook.utils.hookapi.tool.StaticFieldCompat;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -37,12 +38,20 @@ public class SharedUserPatch extends CorePatchHelper {
             if (CorePatchHelper.isSharedUserEnabled()) {
                 try {
                     var field = findField(utilClass, "ALLOW_NON_PRELOADS_SYSTEM_SHAREDUIDS");
-                    int accessFlags = (int) getIntField(field, "accessFlags");
-
-                    setIntField(field, "accessFlags", accessFlags & ~Modifier.FINAL);
-                    field.set(null, true);
+                    // Android 14+ 的 ART 会拒绝直接写 static final（4.0.8.0 上实测：
+                    // "ALLOW_NON_PRELOADS_SYSTEM_SHAREDUIDS write failed: IllegalAccessException"）。
+                    // 先走 StaticFieldCompat（Unsafe），失败再退回老的「把 Field.accessFlags 的
+                    // FINAL 位抹掉再 set」——后者在 Android 17 上基本没用，留作旧系统兜底。
+                    boolean written = StaticFieldCompat.setStaticObject(
+                        utilClass, "ALLOW_NON_PRELOADS_SYSTEM_SHAREDUIDS", Boolean.TRUE);
+                    if (!written) {
+                        int accessFlags = (int) getIntField(field, "accessFlags");
+                        setIntField(field, "accessFlags", accessFlags & ~Modifier.FINAL);
+                        field.set(null, true);
+                    }
                 } catch (Throwable e) {
-                    String message = "ALLOW_NON_PRELOADS_SYSTEM_SHAREDUIDS write failed";
+                    String message = "ALLOW_NON_PRELOADS_SYSTEM_SHAREDUIDS write failed"
+                        + " (unsafeAvailable=" + StaticFieldCompat.isAvailable() + ")";
                     if (e instanceof IllegalAccessException && Build.VERSION.SDK_INT >= 37) {
                         message += ": Android 17 / targetSdk 37 ART restriction; sharedUser bypass is inactive";
                     }

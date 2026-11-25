@@ -92,13 +92,26 @@ public class AppDetails extends BaseHook {
 
     /**
      * Hook Fragment 构造函数
+     * <p>
+     * 这里挂的是<b>全局</b>的 {@code androidx.fragment.app.Fragment} 构造器，进程里每个 Fragment
+     * （气泡设置页、权限页、各设置子页…）都会走一遍。ezHookTool 的
+     * {@code Fields.find(..).filterByType(..).first()} 在找不到字段时是<b>抛异常</b>而不是返回 null，
+     * 所以以前只要进程里出现一个没有 {@code PackageInfo} 字段的 Fragment，就会在它的构造器里抛
+     * {@code MemberNotFoundException}，日志表现为「before hook failed ... Field not found in
+     * com.miui.bubbles.settings.BubblesSettingsFragment」（4.0.8.0 实测，每开一次就刷一条）。
+     * 找不到字段就说明这不是应用详情页的 Fragment，直接返回即可。
      */
     private void hookFragmentConstructor() {
         findAndHookConstructor(mFragmentCls, new IMethodHook() {
             @Override
             public void before(HookParam param) {
-                Field piField = com.sevtinge.hyperceiler.libhook.base.BaseHook.findFirstFieldByExactType(
-                    param.getThisObject().getClass(), PackageInfo.class);
+                Field piField;
+                try {
+                    piField = com.sevtinge.hyperceiler.libhook.base.BaseHook.findFirstFieldByExactType(
+                        param.getThisObject().getClass(), PackageInfo.class);
+                } catch (Throwable notFound) {
+                    return;
+                }
                 if (piField != null) {
                     mSupportFragment = param.getThisObject();
                 }
