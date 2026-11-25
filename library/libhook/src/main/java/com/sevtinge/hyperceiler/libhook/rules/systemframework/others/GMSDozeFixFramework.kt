@@ -198,44 +198,103 @@ object GMSDozeFixFramework : BaseHook() {
         }
     }
 
+    /**
+     * GMS 加入「休眠仍然允许联网」白名单，并从系统黑名单里摘出来。
+     *
+     * 4.0.8.0（OS4.0.8）把 ListAppsManager 的两个字段从实例字段改成了静态字段：
+     *   旧：{@code mSystemBlackList} / {@code mUseDataWhiteList}（实例，构造器里初始化）
+     *   新：{@code SYSTEM_BLACK_LIST}（public static List）/ {@code USE_DATA_WHITE_LIST}
+     *       （private static Set，另有 public static getUseDataWhiteList()）
+     * 旧写法在 4.0.8 上必抛 NoSuchFieldException（设备日志：Hook Failed in isInWhiteList /
+     * Failed to modify mSystemBlackList，每次开机两条 E）。这里按「新字段优先、旧字段兜底」
+     * 解析一次，解析结果缓存成 lambda 里的局部引用，避免每次调用反射查找。
+     * 两个字段都没有时打 E，不静默。
+     */
     private fun hookListAppsManager(clazz: Class<*>?) {
         clazz ?: return
-        try {
-            chainAllConstructors(clazz) { chain ->
-                val result = chain.proceed()
-                try {
-                    val thisObject = chain.thisObject ?: return@chainAllConstructors result
-                    val blackList = getObjectField(thisObject, "mSystemBlackList")
-                        as? MutableCollection<Any?>
-                        ?: return@chainAllConstructors result
-                    blackList.remove(GMS_PACKAGE_NAME)
-                } catch (e: Exception) {
-                    XposedLog.e(TAG, packageName, "Failed to modify mSystemBlackList", e)
+
+        // ---- 白名单集合：新静态 getter/字段 → 旧实例字段 ----
+        val staticWhiteList: MutableSet<String>? = runCatching {
+            clazz.getDeclaredMethod("getUseDataWhiteList").apply { isAccessible = true }
+                .invoke(null) as? MutableSet<String>
+        }.getOrNull() ?: runCatching {
+            clazz.getDeclaredField("USE_DATA_WHITE_LIST").apply { isAccessible = true }
+                .get(null) as? MutableSet<String>
+        }.getOrNull()
+
+        val instanceWhiteField = clazz.declaredFields.firstOrNull { it.name == "mUseDataWhiteList" }
+            ?.apply { isAccessible = true }
+
+        // ---- 系统黑名单：新静态字段 → 旧实例字段 ----
+        val staticBlackList: MutableCollection<Any?>? = runCatching {
+            clazz.getDeclaredField("SYSTEM_BLACK_LIST").apply { isAccessible = true }
+                .get(null) as? MutableCollection<Any?>
+        }.getOrNull()
+
+        val instanceBlackField = clazz.declaredFields.firstOrNull { it.name == "mSystemBlackList" }
+            ?.apply { isAccessible = true }
+
+        if (staticWhiteList == null && instanceWhiteField == null) {
+            XposedLog.e(TAG, packageName,
+                "USE_DATA_WHITE_LIST / mUseDataWhiteList 都不存在，GMS 没有被加进休眠白名单")
+        }
+        if (staticBlackList == null && instanceBlackField == null) {
+            XposedLog.e(TAG, packageName,
+                "SYSTEM_BLACK_LIST / mSystemBlackList 都不存在，GMS 无法从系统黑名单摘除")
+        }
+        XposedLog.d(TAG, packageName,
+            "ListAppsManager fields: whiteList(static/instance)=" +
+                "${staticWhiteList != null}/${instanceWhiteField != null}, blackList(static/instance)=" +
+                "${staticBlackList != null}/${instanceBlackField != null}")
+
+        // 静态字段现在就改一次；之后每次 isInWhiteList / isIncludeSystemBlack 再兜一次，
+        // 因为云端配置（dealCloudWhiteList）会 clear+重建这些集合。
+        staticBlackList?.remove(GMS_PACKAGE_NAME)
+        staticWhiteList?.add(GMS_PACKAGE_NAME)
+
+        if (instanceBlackField != null) {
+            try {
+                chainAllConstructors(clazz) { chain ->
+                    val result = chain.proceed()
+                    try {
+                        val thisObject = chain.thisObject ?: return@chainAllConstructors result
+                        (instanceBlackField.get(thisObject) as? MutableCollection<Any?>)
+                            ?.remove(GMS_PACKAGE_NAME)
+                    } catch (e: Exception) {
+                        XposedLog.e(TAG, packageName, "Failed to modify mSystemBlackList", e)
+                    }
+                    result
                 }
-                result
+                clazz.declaredConstructors.forEach { constructor ->
+                    Deoptimizers.deoptimize(constructor)
+                }
+            } catch (e: Exception) {
+                XposedLog.e(TAG, packageName, "Hook Failed in ListAppsManager constructor", e)
             }
-            clazz.declaredConstructors.forEach { constructor ->
-                Deoptimizers.deoptimize(constructor)
-            }
-        } catch (e: Exception) {
-            XposedLog.e(TAG, packageName, "Hook Failed in ListAppsManager constructor", e)
         }
 
         try {
-            val useDataWhiteListField = clazz.findField {
-                name("mUseDataWhiteList")
-            }.apply {
-                isAccessible = true
-            }
-            val isInWhiteListMethod = clazz.findMethod {
-                name("isInWhiteList")
-            }
+            val isInWhiteListMethod = clazz.declaredMethods.firstOrNull {
+                it.name == "isInWhiteList" && it.parameterCount == 1 &&
+                    it.parameterTypes[0] == String::class.java
+            } ?: throw NoSuchMethodException("isInWhiteList(String)")
             isInWhiteListMethod.createInterceptHook { chain ->
                 try {
-                    @Suppress("UNCHECKED_CAST")
-                    val whiteList = useDataWhiteListField.get(chain.thisObject)
-                        as? MutableSet<String>
-                    whiteList?.add(GMS_PACKAGE_NAME)
+                    val target = chain.getArg(0) as? String
+                    if (target == GMS_PACKAGE_NAME) {
+                        // 白名单集合能拿到就顺手补进去（多处会被直接读），
+                        // 但这个方法的返回值才是冻结判定的唯一依据，所以直接放行。
+                        staticWhiteList?.add(GMS_PACKAGE_NAME)
+                        instanceWhiteField?.let { field ->
+                            (field.get(chain.thisObject) as? MutableSet<String>)
+                                ?.add(GMS_PACKAGE_NAME)
+                        }
+                        return@createInterceptHook true
+                    }
+                    instanceWhiteField?.let { field ->
+                        (field.get(chain.thisObject) as? MutableSet<String>)
+                            ?.add(GMS_PACKAGE_NAME)
+                    }
                 } catch (e: Exception) {
                     XposedLog.e(TAG, packageName, "Failed to modify mUseDataWhiteList", e)
                 }

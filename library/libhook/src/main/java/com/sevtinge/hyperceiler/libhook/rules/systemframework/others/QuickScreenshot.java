@@ -18,12 +18,15 @@
 */
 package com.sevtinge.hyperceiler.libhook.rules.systemframework.others;
 
+import com.sevtinge.hyperceiler.common.log.XposedLog;
 import com.sevtinge.hyperceiler.libhook.base.BaseHook;
 import io.github.lingqiqi5211.ezhooktool.xposed.java.IMethodHook;
 
 import io.github.lingqiqi5211.ezhooktool.xposed.common.HookParam;
 
 public class QuickScreenshot extends BaseHook {
+
+    private static final String METHOD = "getScreenshotChordLongPressDelay";
 
     /**
      * 截屏快捷键长按时延的取值方法。它的宿主类在框架重构中搬过家
@@ -45,14 +48,21 @@ public class QuickScreenshot extends BaseHook {
             }
         };
 
+        StringBuilder tried = new StringBuilder();
         for (String host : DELAY_HOSTS) {
             Class<?> clazz = findClassIfExists(host);
             if (clazz == null) {
+                tried.append(host).append("(类不存在) ");
                 continue;
             }
-            if (!hookAllMethods(clazz, "getScreenshotChordLongPressDelay", hook).isEmpty()) {
-                break;
+            if (!hookAllMethods(clazz, METHOD, hook).isEmpty()) {
+                XposedLog.d(TAG, getPackageName(), "QuickScreenshot: hooked " + host + "#" + METHOD);
+                return;
             }
+            tried.append(host).append(' ');
         }
+        // 两个宿主都没有这个方法时必须报 E：否则「截屏长按时长」静默失效，排查时只能靠猜
+        XposedLog.e(TAG, getPackageName(),
+            "QuickScreenshot: " + METHOD + " 在候选宿主里都没找到（" + tried.toString().trim() + "），长按时长未生效");
     }
 }
