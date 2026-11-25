@@ -20,6 +20,7 @@ package com.sevtinge.hyperceiler.dashboard;
 
 import android.app.Activity;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.content.res.Resources;
 import android.content.res.XmlResourceParser;
 import android.os.Bundle;
@@ -35,6 +36,9 @@ import androidx.annotation.Nullable;
 import androidx.annotation.XmlRes;
 import androidx.core.view.MenuProvider;
 import androidx.preference.Preference;
+import androidx.preference.PreferenceCategory;
+import androidx.preference.PreferenceGroup;
+import androidx.preference.PreferenceScreen;
 
 import com.sevtinge.hyperceiler.common.log.AndroidLog;
 import com.sevtinge.hyperceiler.core.R;
@@ -80,6 +84,7 @@ public class DashboardFragment extends SettingsPreferenceFragment {
     public void onCreatePreferencesAfter(Bundle bundle, String s) {
         super.onCreatePreferencesAfter(bundle, s);
         int xmlResId = getPreferenceScreenResId();
+        markUnavailableIfTargetMissing(xmlResId);
         // 先查缓存
         if (sQuickRestartCache.containsKey(xmlResId)) {
             mQuickRestartPackageName = sQuickRestartCache.get(xmlResId);
@@ -172,6 +177,46 @@ public class DashboardFragment extends SettingsPreferenceFragment {
                 return false;
             }
         }, getViewLifecycleOwner());
+    }
+
+    /**
+     * 目标应用不存在时（未安装，或被 KernelSU / Magisk 模块屏蔽），这一页的开关点了也不会生效。
+     * 与其留一堆假开关，统一按「当前系统版本不支持」处理，与 {@link #setFuncHint} 的语义一致。
+     * <p>
+     * 判定依据是 XML 根节点上的 {@code app:quick_restart}（就是这一页要 hook 的包名）；
+     * 本机实测：{@code guard_provider.xml} 的 quick_restart 是 {@code com.miui.guardprovider}，
+     * 被 KSU 模块屏蔽后该包查不到，于是「禁用环境检查 / 阻止上传应用列表」两个开关会变成不可用。
+     */
+    private void markUnavailableIfTargetMissing(@XmlRes int xmlResId) {
+        Context context = getContext();
+        if (context == null || xmlResId == 0) return;
+        String target = getQuickRestartPackageName(context, xmlResId);
+        // 只有「看起来是包名」的才做判定，避免把普通描述文案当成包名误伤整页
+        if (target == null || !target.contains(".")) return;
+        try {
+            context.getPackageManager().getPackageInfo(target, 0);
+            return;
+        } catch (PackageManager.NameNotFoundException ignored) {
+            // 目标包不存在，继续往下标记
+        }
+        PreferenceScreen screen = getPreferenceScreen();
+        if (screen == null) return;
+        markUnsupported(screen, target);
+    }
+
+    private void markUnsupported(PreferenceGroup group, String target) {
+        if (group == null) return;
+        for (int i = 0; i < group.getPreferenceCount(); i++) {
+            Preference p = group.getPreference(i);
+            if (p instanceof PreferenceCategory category) {
+                markUnsupported(category, target);
+            } else if (p instanceof PreferenceGroup nested && nested.getPreferenceCount() > 0) {
+                markUnsupported(nested, target);
+            } else {
+                p.setEnabled(false);
+                p.setSummary(R.string.unsupported_system_func);
+            }
+        }
     }
 
     private String getQuickRestartPackageName(Context context, @XmlRes int xmlResId) {
